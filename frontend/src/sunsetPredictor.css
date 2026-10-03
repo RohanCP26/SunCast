@@ -103,9 +103,16 @@
   animation: rise 0.7s ease 0.16s both;
 }
 
+.coord-readout {
+  margin: 0.55rem 0 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: rgba(255, 248, 241, 0.48);
+}
+
 .location-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(0, 0.7fr) minmax(0, 0.7fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 0.65rem;
   align-items: end;
   width: min(100%, 640px);
@@ -634,31 +641,22 @@
 
 @media (max-width: 860px) {
   .location-bar {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     width: 100%;
   }
 
-  .field.place {
-    grid-column: 1 / -1;
-  }
-
   .location-bar button {
-    grid-column: 1 / -1;
     min-height: 48px;
   }
 
   .week-strip {
-    display: flex;
-    overflow-x: auto;
-    gap: 0.55rem;
-    padding-bottom: 0.35rem;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    overflow: hidden;
   }
 
   .day-chip {
-    flex: 0 0 4.8rem;
-    scroll-snap-align: start;
+    min-width: 0;
   }
 
   .day-detail {

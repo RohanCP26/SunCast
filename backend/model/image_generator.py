@@ -138,7 +138,7 @@ class SunsetImageGenerator:
 
         resp = requests.get(
             image_url,
-            timeout=60,
+            timeout=12,
             allow_redirects=True,
             headers={"User-Agent": "SunCast/1.0"},
         )

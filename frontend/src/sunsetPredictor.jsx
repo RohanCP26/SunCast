@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { apiJson, apiUrl } from './api';
 import { getDeviceLocation } from './deviceLocation';
 import { scheduleHighScoreNotifications, isNativeApp } from './notifications';
@@ -74,6 +74,8 @@ const SunsetPredictor = () => {
   const [viewpoints, setViewpoints] = useState([]);
   const [viewpointsLoading, setViewpointsLoading] = useState(false);
   const [locating, setLocating] = useState(false);
+  const userPickedLocation = useRef(false);
+  const requestId = useRef(0);
 
   const selected = week?.days?.find((d) => d.date === selectedDate) || week?.days?.[0];
 
@@ -101,6 +103,7 @@ const SunsetPredictor = () => {
 
   const loadWeek = async (loc = location, options = {}) => {
     const resolveLocation = options.resolveLocation ?? !loc.fromDevice;
+    const id = ++requestId.current;
     setLoading(true);
     setError(null);
     setImageUrl(null);
@@ -113,13 +116,15 @@ const SunsetPredictor = () => {
           latitude: Number(loc.latitude),
           longitude: Number(loc.longitude),
           location_name: loc.location_name || 'Custom location',
-          // GPS coords must not be overwritten by geocoding the place label.
+          // A typed place name is geocoded. GPS coordinates are used as-is.
           resolve_location: resolveLocation,
+          require_geocode: Boolean(options.requireGeocode),
           days: 7,
         }),
       });
-      const topViewpoint = await loadViewpoints(data.location || loc);
-      const enriched = { ...data, topViewpoint };
+      if (id !== requestId.current) return;
+      if (!options.manual && userPickedLocation.current) return;
+      const enriched = { ...data, topViewpoint: null };
       setWeek(enriched);
       if (data.location) {
         setLocation({
@@ -133,15 +138,23 @@ const SunsetPredictor = () => {
       if (isNativeApp()) {
         scheduleHighScoreNotifications(enriched).catch(console.error);
       }
+      const topViewpoint = await loadViewpoints(data.location || loc);
+      if (id !== requestId.current || !topViewpoint) return;
+      setWeek((current) => (
+        current ? { ...current, topViewpoint } : current
+      ));
     } catch (err) {
-      setError(err.message);
-      console.error(err);
+      if (id === requestId.current) {
+        setError(err.message);
+        console.error(err);
+      }
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   };
 
   const useMyLocation = async () => {
+    userPickedLocation.current = true;
     setLocating(true);
     setError(null);
     try {
@@ -151,7 +164,7 @@ const SunsetPredictor = () => {
         return;
       }
       setLocation(deviceLoc);
-      await loadWeek(deviceLoc, { resolveLocation: false });
+      await loadWeek(deviceLoc, { resolveLocation: false, manual: true });
     } finally {
       setLocating(false);
     }
@@ -162,7 +175,7 @@ const SunsetPredictor = () => {
     setImageLoading(true);
     setImageError(null);
     try {
-      const response = await fetch(apiUrl('/api/predict'), {
+      const response = await fetch(apiUrl('/api/generate-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -179,8 +192,8 @@ const SunsetPredictor = () => {
         }),
       });
       const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `Image API error: ${response.status}`);
+      if (!response.ok || !data.success || !data.image_url) {
+        throw new Error(data.error || 'Could not generate an image');
       }
       setImageUrl(data.image_url);
       setImageProvider(data.provider);
@@ -199,6 +212,7 @@ const SunsetPredictor = () => {
       const deviceLoc = await getDeviceLocation();
       if (cancelled) return;
       setLocating(false);
+      if (userPickedLocation.current) return;
       if (deviceLoc) {
         setLocation(deviceLoc);
         await loadWeek(deviceLoc, { resolveLocation: false });
@@ -221,10 +235,14 @@ const SunsetPredictor = () => {
   const handleLocationSubmit = (e) => {
     e.preventDefault();
     const typed = String(location.location_name || '').trim();
-    // Prefer geocoding when the user typed a place name; otherwise keep lat/lon as-is.
+    if (!typed) {
+      setError('Enter a city or place name.');
+      return;
+    }
+    userPickedLocation.current = true;
     loadWeek(
-      { ...location, fromDevice: false },
-      { resolveLocation: Boolean(typed) && typed !== 'Current location' }
+      { ...location, location_name: typed, fromDevice: false },
+      { resolveLocation: true, requireGeocode: true, manual: true }
     );
   };
 
@@ -245,7 +263,7 @@ const SunsetPredictor = () => {
         <div className="sky-wash" aria-hidden="true" />
         <div className="sky-hero-inner">
           <div className="brand">
-            <img src="/suncast-logo.jpg" alt="" className="brand-logo" />
+            <img src="/suncast-logo.png" alt="" className="brand-logo" />
             <span>SunCast</span>
           </div>
           <h1>Know tonight&apos;s sky.</h1>
@@ -259,44 +277,15 @@ const SunsetPredictor = () => {
               <input
                 type="text"
                 value={location.location_name}
-                onChange={(e) =>
+                onChange={(e) => {
+                  userPickedLocation.current = true;
                   setLocation((p) => ({
                     ...p,
                     location_name: e.target.value,
                     fromDevice: false,
-                  }))
-                }
+                  }));
+                }}
                 placeholder="Austin, TX"
-              />
-            </label>
-            <label className="field">
-              <span>Lat</span>
-              <input
-                type="number"
-                step="0.0001"
-                value={location.latitude}
-                onChange={(e) =>
-                  setLocation((p) => ({
-                    ...p,
-                    latitude: e.target.value,
-                    fromDevice: false,
-                  }))
-                }
-              />
-            </label>
-            <label className="field">
-              <span>Lon</span>
-              <input
-                type="number"
-                step="0.0001"
-                value={location.longitude}
-                onChange={(e) =>
-                  setLocation((p) => ({
-                    ...p,
-                    longitude: e.target.value,
-                    fromDevice: false,
-                  }))
-                }
               />
             </label>
             <button
@@ -307,10 +296,13 @@ const SunsetPredictor = () => {
             >
               {locating ? 'Locating…' : 'Use my location'}
             </button>
-            <button type="submit" disabled={loading || locating}>
+            <button type="submit" disabled={loading}>
               {loading ? 'Updating…' : 'Update'}
             </button>
           </form>
+          <p className="coord-readout">
+            {Number(location.latitude).toFixed(3)}, {Number(location.longitude).toFixed(3)}
+          </p>
         </div>
       </header>
 
@@ -323,13 +315,6 @@ const SunsetPredictor = () => {
               <h2>This week</h2>
               <p>
                 {week?.location?.name || location.location_name}
-                {week?.location?.latitude != null && (
-                  <span className="coords">
-                    {' '}
-                    · {Number(week.location.latitude).toFixed(2)}, {Number(week.location.longitude).toFixed(2)}
-                    {week.location.timezone ? ` · ${week.location.timezone}` : ''}
-                  </span>
-                )}
                 {week?.best_day
                   ? ` · Best: ${week.best_day.weekday} (${week.best_day.aesthetic_score}/10)`
                   : ''}

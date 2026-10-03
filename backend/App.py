@@ -671,6 +671,11 @@ def week_forecast():
                 latitude = geocoded['latitude']
                 longitude = geocoded['longitude']
                 location_name = geocoded.get('label') or location_name
+            elif data.get('require_geocode'):
+                return jsonify({
+                    'success': False,
+                    'error': f'Could not find "{location_name}". Try a city name.',
+                }), 404
 
         if latitude is None or longitude is None:
             latitude = 30.2672
@@ -1026,6 +1031,47 @@ def social_update_post(post_id):
         return jsonify({'success': False, 'error': str(e)}), 404
 
 
+@app.route('/api/social/posts/<int:post_id>/like', methods=['POST'])
+def social_like_post(post_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        post = SOCIAL.toggle_like(user['id'], post_id)
+        return jsonify({'success': True, 'post': post})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+
+
+@app.route('/api/social/posts/<int:post_id>/rate', methods=['POST'])
+def social_rate_post(post_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        post = SOCIAL.rate_post(user['id'], post_id, data.get('score'))
+        author = SOCIAL.received_rating(post['user_id'])
+        return jsonify({'success': True, 'post': post, 'author_rating': author})
+    except ValueError as e:
+        status = 404 if str(e) == 'Post not found' else 400
+        return jsonify({'success': False, 'error': str(e)}), status
+
+
+@app.route('/api/social/posts/<int:post_id>/comments', methods=['POST'])
+def social_comment_post(post_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        post = SOCIAL.add_comment(user['id'], post_id, data.get('body'))
+        return jsonify({'success': True, 'post': post})
+    except ValueError as e:
+        status = 404 if str(e) == 'Post not found' else 400
+        return jsonify({'success': False, 'error': str(e)}), status
+
+
 def _get_visual_description(prediction):
     """Generate human-readable description of predicted sunset"""
     hue = prediction['hue_shift']
@@ -1074,11 +1120,13 @@ def _get_visual_description(prediction):
 # ERROR HANDLERS
 # ============================================================================
 
-@app.route('/<path:asset_path>', methods=['GET'])
+@app.route('/<path:asset_path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 def frontend_file(asset_path):
     """Static files from the React build. API routes stay on their own handlers."""
+    if asset_path.startswith('api/') or asset_path.startswith('uploads/') or request.method != 'GET':
+        return jsonify({'error': 'Endpoint not found'}), 404
     build = _frontend_build_dir()
-    if not build or asset_path.startswith('api/') or asset_path.startswith('uploads/'):
+    if not build:
         return jsonify({'error': 'Endpoint not found'}), 404
     full = os.path.normpath(os.path.join(build, asset_path))
     if not full.startswith(os.path.normpath(build)) or not os.path.isfile(full):

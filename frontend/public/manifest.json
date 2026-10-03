@@ -9,9 +9,9 @@
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/suncast-logo.jpg",
-      "sizes": "512x512",
-      "type": "image/jpeg",
+      "src": "/suncast-logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

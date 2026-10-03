@@ -6,6 +6,10 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: hidden;
+  max-width: 100%;
+  overscroll-behavior-x: none;
+  touch-action: pan-y;
 }
 
 body {
@@ -14,10 +18,17 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: #f6efe8;
   color: #1a1520;
+  overflow-x: hidden;
+  max-width: 100%;
+  overscroll-behavior-x: none;
+  touch-action: pan-y;
 }
 
-#root {
+#root,
+.app {
   min-height: 100vh;
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 button,

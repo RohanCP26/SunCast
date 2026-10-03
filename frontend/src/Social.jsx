@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { apiJson, apiUrl, authHeaders } from './api';
 import './Social.css';
 
@@ -8,7 +8,205 @@ const Avatar = ({ user, className = 'avatar' }) => {
   if (user?.avatar_url) {
     return <img className={className} src={apiUrl(user.avatar_url)} alt="" />;
   }
-  return <span className={`${className} avatar-fallback`} aria-hidden="true">{initialOf(user?.display_name)}</span>;
+  return (
+    <span className={`${className} avatar-fallback`} aria-hidden="true">
+      {initialOf(user?.display_name || user?.username)}
+    </span>
+  );
+};
+
+const Heart = ({ filled }) => (
+  <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+    <path
+      d="M12 20.2S5.2 15.9 5.2 11C5.2 8.2 7 6.4 9.2 6.4c1.3 0 2.4.6 2.8 1.6.4-1 1.5-1.6 2.8-1.6 2.2 0 4 1.8 4 4.6 0 4.9-6.8 9.2-6.8 9.2z"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const ratingLabel = (value) => (value == null ? '—' : Number(value).toFixed(1));
+
+const scoreFromBar = (bar, clientX) => {
+  const rect = bar.getBoundingClientRect();
+  const ratio = rect.width ? (clientX - rect.left) / rect.width : 0;
+  const clamped = Math.min(1, Math.max(0, ratio));
+  return Math.round(clamped * 9) + 1;
+};
+
+const RateBar = ({ value, onChange }) => {
+  const barRef = useRef(null);
+  const dragging = useRef(false);
+  const [dragScore, setDragScore] = useState(null);
+  const shown = dragScore ?? value ?? null;
+  const position = shown ? `${((shown - 1) / 9) * 100}%` : '0%';
+
+  const finish = (clientX) => {
+    if (!dragging.current || !barRef.current) return;
+    dragging.current = false;
+    const score = scoreFromBar(barRef.current, clientX);
+    setDragScore(null);
+    if (score !== value) onChange(score);
+  };
+
+  return (
+    <div className="rate-row">
+      <span className="rate-value">{shown || 'Rate'}</span>
+      <div
+        ref={barRef}
+        className="rate-bar"
+        role="slider"
+        tabIndex={0}
+        aria-label="Rate this sunset"
+        aria-valuemin={1}
+        aria-valuemax={10}
+        aria-valuenow={shown ?? undefined}
+        aria-valuetext={shown ? `${shown} out of 10` : 'Not rated'}
+        onPointerDown={(event) => {
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch (err) {
+            // Some browsers reject capture until the pointer is active.
+          }
+          dragging.current = true;
+          setDragScore(scoreFromBar(event.currentTarget, event.clientX));
+        }}
+        onPointerMove={(event) => {
+          if (!dragging.current) return;
+          setDragScore(scoreFromBar(event.currentTarget, event.clientX));
+        }}
+        onPointerUp={(event) => finish(event.clientX)}
+        onPointerCancel={(event) => finish(event.clientX)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            onChange(Math.min(10, (value || 0) + 1));
+          } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowDown') && value) {
+            event.preventDefault();
+            onChange(Math.max(1, value - 1));
+          }
+        }}
+      >
+      <span className="rate-track">
+        <span className="rate-fill" style={{ width: position }} />
+      </span>
+      {shown ? <span className="rate-thumb" style={{ left: position }} /> : null}
+      <span className="rate-ticks" aria-hidden="true">
+        {Array.from({ length: 10 }, (_, index) => <i key={index} />)}
+      </span>
+      </div>
+    </div>
+  );
+};
+
+const PostCard = ({ post, burstKey, onLike, onRate, onComment, children }) => {
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const lastTap = useRef(0);
+
+  const onPhotoClick = () => {
+    const now = Date.now();
+    if (now - lastTap.current < 320) {
+      onLike(post, { fromPhoto: true });
+    }
+    lastTap.current = now;
+  };
+
+  const sendComment = async (event) => {
+    event.preventDefault();
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    try {
+      await onComment(post, body);
+      setDraft('');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <article className="post-card">
+      <header className="post-head">
+        <Avatar
+          user={{ display_name: post.display_name, avatar_url: post.avatar_url }}
+          className="avatar avatar-sm"
+        />
+        <div className="post-who">
+          <strong>{post.display_name}</strong>
+          <span>{post.location_name || 'Somewhere in the light'}</span>
+        </div>
+        <time dateTime={post.created_at}>{timeLabel(post)}</time>
+      </header>
+      <button type="button" className="photo-stage" onClick={onPhotoClick}>
+        <img src={apiUrl(post.image_url)} alt={post.caption || `Sunset by ${post.display_name}`} />
+        {burstKey ? (
+          <span key={burstKey} className="like-burst">
+            <Heart filled />
+          </span>
+        ) : null}
+      </button>
+      <div className="post-actions">
+        <button
+          type="button"
+          className={`heart-btn${post.liked ? ' liked' : ''}`}
+          aria-pressed={!!post.liked}
+          aria-label={post.liked ? 'Unlike' : 'Like'}
+          onClick={() => onLike(post)}
+        >
+          <Heart filled={!!post.liked} />
+          <span>{post.like_count || 0}</span>
+        </button>
+        <p className="rating-summary">
+          {post.rating_count
+            ? `${ratingLabel(post.rating_average)} average · ${post.rating_count}`
+            : 'No ratings yet'}
+        </p>
+      </div>
+      <RateBar value={post.my_rating} onChange={(score) => onRate(post, score)} />
+      <div className="post-body">
+        {children}
+        <div className="comments">
+          {(post.comments || []).map((comment) => (
+            <div key={comment.id} className="comment">
+              <Avatar user={comment} className="avatar avatar-sm" />
+              <p>
+                <strong>{comment.display_name}</strong> {comment.body}
+                <span className="muted">{timeLabel(comment)}</span>
+              </p>
+            </div>
+          ))}
+          <form className="comment-form" onSubmit={sendComment}>
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              maxLength={400}
+              placeholder="Add a comment"
+              aria-label="Add a comment"
+            />
+            <button type="submit" disabled={sending || !draft.trim()}>
+              {sending ? '…' : 'Post'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </article>
+  );
+};
+
+const timeLabel = (post) => {
+  const raw = post?.created_at;
+  if (!raw) return post?.sunset_date || '';
+  const then = new Date(raw.endsWith('Z') || raw.includes('+') ? raw : `${raw}Z`);
+  if (Number.isNaN(then.getTime())) return post?.sunset_date || '';
+  const seconds = Math.max(0, (Date.now() - then.getTime()) / 1000);
+  if (seconds < 60) return 'Just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
+  return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
 const Social = () => {
@@ -32,9 +230,17 @@ const Social = () => {
   const [identity, setIdentity] = useState({ display_name: '', username: '' });
   const [editingPostId, setEditingPostId] = useState(null);
   const [postDraft, setPostDraft] = useState({ caption: '', location_name: '', sunset_date: '' });
+  const [activePost, setActivePost] = useState(null);
+  const [bursts, setBursts] = useState({});
 
   const friendCount = (friends.friends || []).length;
-  const friendLabel = friendCount === 1 ? '1 friend' : `${friendCount} friends`;
+  const requestCount = (friends.incoming || []).length;
+  const friendFeed = feed.filter((post) => post.user_id !== user?.id);
+  const photoUrl = useMemo(() => (photo ? URL.createObjectURL(photo) : ''), [photo]);
+
+  useEffect(() => () => {
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+  }, [photoUrl]);
 
   const refresh = async () => {
     const me = await apiJson('/api/social/me');
@@ -73,6 +279,7 @@ const Social = () => {
       });
       localStorage.setItem('suncast_token', data.token);
       setUser(data.user);
+      setView('feed');
       await refresh();
     } catch (err) {
       setError(err.message);
@@ -87,6 +294,7 @@ const Social = () => {
     setFeed([]);
     setView('feed');
     setMyPosts([]);
+    setActivePost(null);
   };
 
   const searchFriends = async (event) => {
@@ -149,6 +357,12 @@ const Social = () => {
     }
   };
 
+  const openCompose = () => {
+    setError(null);
+    setNotice(null);
+    setView('compose');
+  };
+
   const submitPost = async (e) => {
     e.preventDefault();
     if (!photo) {
@@ -173,7 +387,8 @@ const Social = () => {
       setCaption('');
       setLocationName('');
       setPhoto(null);
-      await refresh();
+      setView('feed');
+      await Promise.all([refresh(), loadMyPosts()]);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -185,9 +400,11 @@ const Social = () => {
     setView('profile');
     setEditingIdentity(false);
     setEditingPostId(null);
+    setActivePost(null);
     setError(null);
     try {
-      await loadMyPosts();
+      const [me] = await Promise.all([apiJson('/api/social/me'), loadMyPosts()]);
+      setUser(me.user);
     } catch (err) {
       setError(err.message);
     }
@@ -242,6 +459,13 @@ const Social = () => {
     }
   };
 
+  const openPost = (post) => {
+    setActivePost(post);
+    setEditingPostId(null);
+    setError(null);
+    setView('post');
+  };
+
   const startPostEdit = (post) => {
     setEditingPostId(post.id);
     setPostDraft({
@@ -262,6 +486,7 @@ const Social = () => {
       });
       setMyPosts((prev) => prev.map((post) => (post.id === data.post.id ? data.post : post)));
       setFeed((prev) => prev.map((post) => (post.id === data.post.id ? data.post : post)));
+      setActivePost(data.post);
       setEditingPostId(null);
     } catch (err) {
       setError(err.message);
@@ -270,9 +495,89 @@ const Social = () => {
     }
   };
 
+  const rememberPost = (post, authorRating) => {
+    setFeed((prev) => prev.map((item) => (item.id === post.id ? post : item)));
+    setMyPosts((prev) => prev.map((item) => (item.id === post.id ? post : item)));
+    setActivePost((prev) => (prev && prev.id === post.id ? post : prev));
+    if (authorRating && user && post.user_id === user.id) {
+      setUser((current) => (current ? { ...current, ...authorRating } : current));
+    }
+  };
+
+  const toggleLike = async (post, { fromPhoto } = {}) => {
+    if (fromPhoto && post.liked) {
+      setBursts((prev) => ({ ...prev, [post.id]: Date.now() }));
+      return;
+    }
+    const liking = !post.liked;
+    if (liking) setBursts((prev) => ({ ...prev, [post.id]: Date.now() }));
+    rememberPost({
+      ...post,
+      liked: liking,
+      like_count: Math.max(0, (post.like_count || 0) + (liking ? 1 : -1)),
+    });
+    try {
+      const data = await apiJson(`/api/social/posts/${post.id}/like`, { method: 'POST' });
+      rememberPost(data.post);
+    } catch (err) {
+      rememberPost(post);
+      setError(err.message);
+    }
+  };
+
+  const ratePost = async (post, score) => {
+    setError(null);
+    try {
+      const data = await apiJson(`/api/social/posts/${post.id}/rate`, {
+        method: 'POST',
+        body: JSON.stringify({ score }),
+      });
+      rememberPost(data.post, data.author_rating);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const commentOn = async (post, body) => {
+    setError(null);
+    try {
+      const data = await apiJson(`/api/social/posts/${post.id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      });
+      rememberPost(data.post);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+  };
+
+  const goBack = () => {
+    setError(null);
+    setEditingPostId(null);
+    if (view === 'post') {
+      setActivePost(null);
+      setView('profile');
+      return;
+    }
+    if (view === 'friends') {
+      setView('profile');
+      return;
+    }
+    setView('feed');
+  };
+
+  const titles = {
+    feed: 'Sunsets',
+    compose: 'New post',
+    profile: 'Profile',
+    friends: 'Friends',
+    post: 'Post',
+  };
+
   if (!user) {
     return (
-      <section className="social-page">
+      <section className="social-page auth-view">
         <header className="social-hero">
           <p className="eyebrow">Community</p>
           <h2>Share tonight&apos;s sky</h2>
@@ -294,6 +599,7 @@ const Social = () => {
               <input
                 value={form.display_name}
                 onChange={(e) => setForm({ ...form, display_name: e.target.value })}
+                autoComplete="name"
               />
             </label>
           )}
@@ -303,6 +609,7 @@ const Social = () => {
               required
               value={form.username}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
+              autoComplete="username"
             />
           </label>
           <label>
@@ -312,6 +619,7 @@ const Social = () => {
               type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
+              autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
             />
           </label>
           {error && <p className="social-error">{error}</p>}
@@ -324,273 +632,321 @@ const Social = () => {
   }
 
   return (
-    <section className="social-page">
-      <header className="social-hero">
-        {view === 'feed' && (
-          <>
-            <p className="eyebrow">Signed in as {user.display_name}</p>
-            <h2>Friends&apos; sunsets</h2>
-          </>
+    <section className={`social-page view-${view}`}>
+      <header className="social-bar">
+        {view === 'feed' ? (
+          <button type="button" className="icon-btn" onClick={openProfile} aria-label="Your profile">
+            <Avatar user={user} className="avatar avatar-sm" />
+            {requestCount > 0 && <span className="request-dot" aria-label={`${requestCount} friend requests`} />}
+          </button>
+        ) : (
+          <button type="button" className="icon-btn back-btn" onClick={goBack} aria-label="Back">
+            <span aria-hidden="true">‹</span>
+          </button>
         )}
-        {view === 'profile' && (
-          <>
-            <button type="button" className="text-btn back-link" onClick={() => setView('feed')}>
-              Back to feed
-            </button>
-            <p className="eyebrow">Your profile</p>
-            <h2>{user.display_name}</h2>
-          </>
+        <h2>{titles[view] || 'Sunsets'}</h2>
+        {view === 'compose' ? (
+          <span className="bar-spacer" />
+        ) : (
+          <button type="button" className="icon-btn add-btn" onClick={openCompose} aria-label="New post">
+            +
+          </button>
         )}
-        {view === 'friends' && (
-          <>
-            <button type="button" className="text-btn back-link" onClick={() => setView('profile')}>
-              Back to profile
-            </button>
-            <p className="eyebrow">Your circle</p>
-            <h2>Friends</h2>
-          </>
-        )}
-        <div className="hero-actions">
-          {view !== 'profile' && view !== 'friends' && (
-            <button type="button" className="text-btn" onClick={openProfile}>Your profile</button>
-          )}
-          <button type="button" className="text-btn" onClick={logout}>Sign out</button>
-        </div>
       </header>
 
       {error && <p className="social-error">{error}</p>}
 
-      {view === 'profile' && (
-        <>
-          <div className="profile-head">
-            <div className="avatar-wrap">
-              <Avatar user={user} />
-              <label className="change-photo">
-                Change photo
-                <input
-                  type="file"
-                  accept="image/*"
-                  disabled={busy}
-                  onChange={(e) => changeAvatar(e.target.files?.[0])}
-                />
-              </label>
+      {view === 'feed' && (
+        <div className="feed">
+          {friendFeed.length === 0 && (
+            <div className="empty-feed">
+              <p>When friends share a sunset, it shows up here.</p>
+              <button type="button" onClick={() => setView('friends')}>Find friends</button>
             </div>
-            <div className="profile-identity">
-              {editingIdentity ? (
-                <form className="profile-form" onSubmit={saveIdentity}>
-                  <label>
-                    Name
-                    <input
-                      required
-                      value={identity.display_name}
-                      onChange={(e) => setIdentity({ ...identity, display_name: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    Username
-                    <input
-                      required
-                      value={identity.username}
-                      onChange={(e) => setIdentity({ ...identity, username: e.target.value })}
-                    />
-                  </label>
-                  <div className="row-actions">
-                    <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-                    <button type="button" className="ghost" onClick={() => setEditingIdentity(false)}>Cancel</button>
-                  </div>
-                </form>
+          )}
+          {friendFeed.map((post) => (
+            <PostCard
+              key={post.id}
+              post={post}
+              burstKey={bursts[post.id]}
+              onLike={toggleLike}
+              onRate={ratePost}
+              onComment={commentOn}
+            >
+              {post.caption ? (
+                <p><strong>{post.display_name}</strong> {post.caption}</p>
               ) : (
-                <>
-                  <h3>{user.display_name}</h3>
-                  <p className="username">@{user.username}</p>
-                  <button type="button" className="text-btn" onClick={startIdentityEdit}>
-                    Edit name and username
-                  </button>
-                </>
+                <p className="muted">Shared a sunset</p>
               )}
-              <button type="button" className="friend-count" onClick={() => setView('friends')}>
-                {friendLabel}
+            </PostCard>
+          ))}
+        </div>
+      )}
+
+      {view === 'compose' && (
+        <form className="compose" onSubmit={submitPost}>
+          <label className="photo-picker">
+            {photoUrl ? (
+              <img src={photoUrl} alt="Selected sunset" />
+            ) : (
+              <span>
+                <strong>Choose a photo</strong>
+                Tap to upload tonight&apos;s sky
+              </span>
+            )}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => setPhoto(e.target.files?.[0] || null)}
+            />
+          </label>
+          <label>
+            Location
+            <input
+              value={locationName}
+              onChange={(e) => setLocationName(e.target.value)}
+              placeholder="Boston, MA"
+            />
+          </label>
+          <label>
+            Caption
+            <textarea
+              value={caption}
+              onChange={(e) => setCaption(e.target.value)}
+              rows={4}
+              placeholder="How did it look?"
+            />
+          </label>
+          <button type="submit" className="share-btn" disabled={busy}>
+            {busy ? 'Posting…' : 'Share'}
+          </button>
+        </form>
+      )}
+
+      {view === 'profile' && (
+        <div className="profile">
+          <div className="profile-top">
+            <label className="avatar-wrap">
+              <Avatar user={user} />
+              <span>{busy ? 'Saving…' : 'Edit photo'}</span>
+              <input
+                type="file"
+                accept="image/*"
+                disabled={busy}
+                onChange={(e) => changeAvatar(e.target.files?.[0])}
+              />
+            </label>
+            <div className="profile-stats" aria-label="Profile stats">
+              <div>
+                <strong>{myPosts.length}</strong>
+                <span>posts</span>
+              </div>
+              <button type="button" onClick={() => setView('friends')}>
+                <strong>{friendCount}</strong>
+                <span>friends</span>
+                {requestCount > 0 && <em>{requestCount} new</em>}
               </button>
+              <div title={user.rating_count ? `From ${user.rating_count} ratings on your posts` : 'No ratings yet'}>
+                <strong>{ratingLabel(user.average_rating)}</strong>
+                <span>rating</span>
+              </div>
             </div>
           </div>
 
-          <div className="feed">
-            <h3>Your posts</h3>
-            {myPosts.length === 0 && <p className="muted">You haven&apos;t shared a sunset yet.</p>}
-            {myPosts.map((post) => (
-              <article key={post.id} className="post-card">
-                <img src={apiUrl(post.image_url)} alt={post.caption || 'Sunset'} />
-                <div className="post-meta">
-                  {editingPostId === post.id ? (
-                    <form className="profile-form" onSubmit={savePost}>
-                      <label>
-                        Caption
-                        <textarea
-                          rows={3}
-                          value={postDraft.caption}
-                          onChange={(e) => setPostDraft({ ...postDraft, caption: e.target.value })}
-                        />
-                      </label>
-                      <label>
-                        Location
-                        <input
-                          value={postDraft.location_name}
-                          onChange={(e) => setPostDraft({ ...postDraft, location_name: e.target.value })}
-                        />
-                      </label>
-                      <label>
-                        Date
-                        <input
-                          type="date"
-                          value={postDraft.sunset_date}
-                          onChange={(e) => setPostDraft({ ...postDraft, sunset_date: e.target.value })}
-                        />
-                      </label>
-                      <div className="row-actions">
-                        <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save post'}</button>
-                        <button type="button" className="ghost" onClick={() => setEditingPostId(null)}>Cancel</button>
-                      </div>
-                    </form>
-                  ) : (
-                    <>
-                      <strong>{post.display_name}</strong>
-                      <span>
-                        {post.location_name || 'Unknown place'}
-                        {post.sunset_date ? ` · ${post.sunset_date}` : ''}
-                      </span>
-                      {post.caption && <p>{post.caption}</p>}
-                      <button type="button" className="text-btn" onClick={() => startPostEdit(post)}>
-                        Edit post
-                      </button>
-                    </>
-                  )}
-                </div>
-              </article>
-            ))}
-          </div>
-        </>
+          {editingIdentity ? (
+            <form className="profile-form" onSubmit={saveIdentity}>
+              <label>
+                Name
+                <input
+                  required
+                  value={identity.display_name}
+                  onChange={(e) => setIdentity({ ...identity, display_name: e.target.value })}
+                />
+              </label>
+              <label>
+                Username
+                <input
+                  required
+                  value={identity.username}
+                  onChange={(e) => setIdentity({ ...identity, username: e.target.value })}
+                />
+              </label>
+              <div className="row-actions">
+                <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+                <button type="button" className="ghost" onClick={() => setEditingIdentity(false)}>Cancel</button>
+              </div>
+            </form>
+          ) : (
+            <div className="profile-bio">
+              <h3>{user.display_name}</h3>
+              <p className="username">@{user.username}</p>
+              <button type="button" className="edit-profile" onClick={startIdentityEdit}>
+                Edit profile
+              </button>
+            </div>
+          )}
+
+          {myPosts.length === 0 ? (
+            <p className="muted empty-grid">You haven&apos;t shared a sunset yet.</p>
+          ) : (
+            <div className="photo-grid">
+              {myPosts.map((post) => (
+                <button
+                  key={post.id}
+                  type="button"
+                  className="grid-cell"
+                  onClick={() => openPost(post)}
+                  aria-label={post.caption || 'Your sunset'}
+                >
+                  <img src={apiUrl(post.image_url)} alt="" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button type="button" className="text-btn sign-out" onClick={logout}>Sign out</button>
+        </div>
+      )}
+
+      {view === 'post' && activePost && (
+        <PostCard
+          post={activePost}
+          burstKey={bursts[activePost.id]}
+          onLike={toggleLike}
+          onRate={ratePost}
+          onComment={commentOn}
+        >
+          {editingPostId === activePost.id ? (
+            <form className="profile-form" onSubmit={savePost}>
+              <label>
+                Caption
+                <textarea
+                  rows={3}
+                  value={postDraft.caption}
+                  onChange={(e) => setPostDraft({ ...postDraft, caption: e.target.value })}
+                />
+              </label>
+              <label>
+                Location
+                <input
+                  value={postDraft.location_name}
+                  onChange={(e) => setPostDraft({ ...postDraft, location_name: e.target.value })}
+                />
+              </label>
+              <label>
+                Date
+                <input
+                  type="date"
+                  value={postDraft.sunset_date}
+                  onChange={(e) => setPostDraft({ ...postDraft, sunset_date: e.target.value })}
+                />
+              </label>
+              <div className="row-actions">
+                <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+                <button type="button" className="ghost" onClick={() => setEditingPostId(null)}>Cancel</button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <p>
+                <strong>{activePost.display_name}</strong>
+                {' '}
+                {activePost.caption || 'Shared a sunset'}
+              </p>
+              <span className="muted">
+                {activePost.location_name || 'Unknown place'}
+                {activePost.sunset_date ? ` · ${activePost.sunset_date}` : ''}
+              </span>
+              {activePost.user_id === user.id && (
+                <button type="button" className="text-btn" onClick={() => startPostEdit(activePost)}>
+                  Edit post
+                </button>
+              )}
+            </>
+          )}
+        </PostCard>
       )}
 
       {view === 'friends' && (
-        <div className="friends-panel friend-list">
-          {friendCount === 0 && <p className="muted">No friends yet</p>}
-          {(friends.friends || []).map((person) => (
+        <div className="friends-panel">
+          <form className="friend-search" onSubmit={searchFriends}>
+            <input
+              value={friendQuery}
+              onChange={(e) => setFriendQuery(e.target.value)}
+              placeholder="Search username"
+              aria-label="Search username"
+            />
+            <button type="submit">Search</button>
+          </form>
+          {notice && <p className="social-notice">{notice}</p>}
+          {searchResults.map((person) => (
             <div key={person.id} className="friend-row">
               <Avatar user={person} className="avatar avatar-sm" />
               <span className="friend-name">
                 {person.display_name}
                 <span className="muted">@{person.username}</span>
               </span>
+              {person.relation === 'friends' && <button type="button" disabled>Friends</button>}
+              {person.relation === 'outgoing' && <button type="button" disabled>Requested</button>}
+              {person.relation === 'incoming' && (
+                <button type="button" onClick={() => respond(person.friendship_id, true)}>Accept</button>
+              )}
+              {(!person.relation || person.relation === 'none') && (
+                <button type="button" onClick={() => sendRequest(person.username)}>Add</button>
+              )}
             </div>
           ))}
-        </div>
-      )}
+          {searched && searchResults.length === 0 && <p className="muted">No one found with that name</p>}
 
-      {view === 'feed' && (
-        <>
-          <div className="social-grid">
-            <form className="compose" onSubmit={submitPost}>
-              <h3>Post today&apos;s sunset</h3>
-              <label>
-                Photo
-                <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files?.[0] || null)} />
-              </label>
-              <label>
-                Location
-                <input value={locationName} onChange={(e) => setLocationName(e.target.value)} placeholder="Boston, MA" />
-              </label>
-              <label>
-                Caption
-                <textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={3} />
-              </label>
-              <button type="submit" disabled={busy}>{busy ? 'Posting…' : 'Share photo'}</button>
-            </form>
-
-            <aside className="friends-panel">
-              <h3>Friends</h3>
-              <form className="friend-search" onSubmit={searchFriends}>
-                <input
-                  value={friendQuery}
-                  onChange={(e) => setFriendQuery(e.target.value)}
-                  placeholder="Find username"
-                  aria-label="Find username"
-                />
-                <button type="submit">Search</button>
-              </form>
-              {notice && <p className="social-notice">{notice}</p>}
-              {searchResults.map((u) => (
-                <div key={u.id} className="friend-row">
-                  <span>@{u.username}</span>
-                  {u.relation === 'friends' && <button type="button" disabled>Friends</button>}
-                  {u.relation === 'outgoing' && <button type="button" disabled>Requested</button>}
-                  {u.relation === 'incoming' && (
-                    <button type="button" onClick={() => respond(u.friendship_id, true)}>Accept</button>
-                  )}
-                  {(!u.relation || u.relation === 'none') && (
-                    <button type="button" onClick={() => sendRequest(u.username)}>Add</button>
-                  )}
+          {requestCount > 0 && (
+            <div className="friend-block">
+              <p className="eyebrow">Requests</p>
+              {friends.incoming.map((person) => (
+                <div key={person.friendship_id} className="friend-row">
+                  <Avatar user={person} className="avatar avatar-sm" />
+                  <span className="friend-name">
+                    {person.display_name}
+                    <span className="muted">@{person.username}</span>
+                  </span>
+                  <div className="row-actions">
+                    <button type="button" onClick={() => respond(person.friendship_id, true)}>Accept</button>
+                    <button type="button" className="ghost" onClick={() => respond(person.friendship_id, false)}>Decline</button>
+                  </div>
                 </div>
               ))}
-              {searched && searchResults.length === 0 && <p className="muted">No one found with that name</p>}
-              {friends.incoming?.length > 0 && (
-                <div className="friend-block">
-                  <p className="eyebrow">Requests</p>
-                  {friends.incoming.map((u) => (
-                    <div key={u.friendship_id} className="friend-row">
-                      <span>@{u.username}</span>
-                      <div className="row-actions">
-                        <button type="button" onClick={() => respond(u.friendship_id, true)}>Accept</button>
-                        <button type="button" className="ghost" onClick={() => respond(u.friendship_id, false)}>Decline</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {friends.outgoing?.length > 0 && (
-                <div className="friend-block">
-                  <p className="eyebrow">Sent requests</p>
-                  {friends.outgoing.map((u) => (
-                    <div key={u.friendship_id} className="friend-row">
-                      <span>{u.display_name}</span>
-                      <span className="muted">Pending</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="friend-block">
-                <p className="eyebrow">Your circle</p>
-                <button type="button" className="friend-count" onClick={() => setView('friends')}>
-                  {friendLabel}
-                </button>
-                {(friends.friends || []).length === 0 && <p className="muted">No friends yet</p>}
-                {(friends.friends || []).map((u) => (
-                  <div key={u.id} className="friend-row">
-                    <span>{u.display_name}</span>
-                    <span className="muted">@{u.username}</span>
-                  </div>
-                ))}
-              </div>
-            </aside>
-          </div>
+            </div>
+          )}
 
-          <div className="feed">
-            <h3>Feed</h3>
-            {feed.length === 0 && <p className="muted">No posts yet — be the first to share tonight.</p>}
-            {feed.map((post) => (
-              <article key={post.id} className="post-card">
-                <img src={apiUrl(post.image_url)} alt={post.caption || 'Sunset'} />
-                <div className="post-meta">
-                  <strong>{post.display_name}</strong>
-                  <span>
-                    {post.location_name || 'Unknown place'}
-                    {post.sunset_date ? ` · ${post.sunset_date}` : ''}
+          {(friends.outgoing || []).length > 0 && (
+            <div className="friend-block">
+              <p className="eyebrow">Sent</p>
+              {friends.outgoing.map((person) => (
+                <div key={person.friendship_id} className="friend-row">
+                  <Avatar user={person} className="avatar avatar-sm" />
+                  <span className="friend-name">
+                    {person.display_name}
+                    <span className="muted">@{person.username}</span>
                   </span>
-                  {post.caption && <p>{post.caption}</p>}
+                  <span className="muted">Pending</span>
                 </div>
-              </article>
+              ))}
+            </div>
+          )}
+
+          <div className="friend-block">
+            <p className="eyebrow">Friends</p>
+            {friendCount === 0 && <p className="muted">No friends yet</p>}
+            {(friends.friends || []).map((person) => (
+              <div key={person.id} className="friend-row">
+                <Avatar user={person} className="avatar avatar-sm" />
+                <span className="friend-name">
+                  {person.display_name}
+                  <span className="muted">@{person.username}</span>
+                </span>
+              </div>
             ))}
           </div>
-        </>
+        </div>
       )}
     </section>
   );

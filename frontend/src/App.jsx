@@ -10,7 +10,7 @@ function App() {
     <div className="app">
       <nav className="app-nav" aria-label="Primary">
         <div className="nav-brand">
-          <img src="/suncast-logo.jpg" alt="" />
+          <img src="/suncast-logo.png" alt="" />
           <span>SunCast</span>
         </div>
         <div className="nav-tabs">
@@ -34,7 +34,7 @@ function App() {
       {tab === 'forecast' ? <SunsetPredictor /> : <Social />}
 
       <footer className="app-footer">
-        <img src="/suncast-logo.jpg" alt="SunCast" className="footer-logo" />
+        <img src="/suncast-logo.png" alt="SunCast" className="footer-logo" />
         <p className="footer-brand">SunCast</p>
         <p className="footer-note">Weather via Open-Meteo · Scored with gradient boosting</p>
         <p className="footer-author">Author: Rohan Paranjape</p>

@@ -76,6 +76,29 @@ class SocialStore:
                     aesthetic_score REAL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS likes (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, post_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS ratings (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                    score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 10),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, post_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                    body TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
@@ -140,12 +163,34 @@ class SocialStore:
 
     def _user_public(self, row) -> Dict:
         avatar_path = row["avatar_path"] if "avatar_path" in row.keys() else None
+        summary = self.received_rating(row["id"])
         return {
             "id": row["id"],
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
             "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,
             "created_at": row["created_at"],
+            "average_rating": summary["average_rating"],
+            "rating_count": summary["rating_count"],
+        }
+
+    def received_rating(self, user_id: int) -> Dict:
+        """Mean of every rating left on this person's posts."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT AVG(r.score) AS average_rating, COUNT(r.score) AS rating_count
+                FROM ratings r
+                JOIN posts p ON p.id = r.post_id
+                WHERE p.user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        count = int(row["rating_count"] or 0)
+        average = row["average_rating"]
+        return {
+            "average_rating": round(float(average), 1) if count and average is not None else None,
+            "rating_count": count,
         }
 
     def update_profile(self, user_id: int, display_name: str = None, username: str = None) -> Dict:
@@ -350,20 +395,20 @@ class SocialStore:
                 ),
             )
             post_id = cur.lastrowid
-        return self.get_post(post_id)
+        return self.get_post(post_id, viewer_id=user_id)
 
-    def posts_for_user(self, user_id: int) -> List[Dict]:
+    def posts_for_user(self, user_id: int, viewer_id: int = None) -> List[Dict]:
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name
+                SELECT p.*, u.username, u.display_name, u.avatar_path
                 FROM posts p JOIN users u ON u.id = p.user_id
                 WHERE p.user_id = ?
                 ORDER BY p.created_at DESC
                 """,
                 (user_id,),
             ).fetchall()
-        return [self._post_public(r) for r in rows]
+        return [self._post_public(r, viewer_id if viewer_id is not None else user_id) for r in rows]
 
     def update_post(
         self,
@@ -388,55 +433,190 @@ class SocialStore:
                 """,
                 (caption or "", location_name or "", sunset_date or "", post_id, user_id),
             )
-        return self.get_post(post_id)
+        return self.get_post(post_id, viewer_id=user_id)
 
-    def get_post(self, post_id: int) -> Optional[Dict]:
+    def get_post(self, post_id: int, viewer_id: int = None) -> Optional[Dict]:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name
+                SELECT p.*, u.username, u.display_name, u.avatar_path
                 FROM posts p JOIN users u ON u.id = p.user_id
                 WHERE p.id = ?
                 """,
                 (post_id,),
             ).fetchone()
-        return self._post_public(row) if row else None
+        return self._post_public(row, viewer_id) if row else None
+
+    def toggle_like(self, user_id: int, post_id: int) -> Dict:
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
+                raise ValueError("Post not found")
+            existing = conn.execute(
+                "SELECT 1 FROM likes WHERE user_id = ? AND post_id = ?",
+                (user_id, post_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "DELETE FROM likes WHERE user_id = ? AND post_id = ?",
+                    (user_id, post_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO likes (user_id, post_id, created_at) VALUES (?, ?, ?)",
+                    (user_id, post_id, now),
+                )
+        post = self.get_post(post_id, viewer_id=user_id)
+        if not post:
+            raise ValueError("Post not found")
+        return post
+
+    def rate_post(self, user_id: int, post_id: int, score: int) -> Dict:
+        try:
+            score = int(score)
+        except (TypeError, ValueError) as e:
+            raise ValueError("Rate from 1 to 10") from e
+        if score < 1 or score > 10:
+            raise ValueError("Rate from 1 to 10")
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
+                raise ValueError("Post not found")
+            conn.execute(
+                """
+                INSERT INTO ratings (user_id, post_id, score, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, post_id) DO UPDATE SET
+                    score = excluded.score,
+                    created_at = excluded.created_at
+                """,
+                (user_id, post_id, score, now),
+            )
+        post = self.get_post(post_id, viewer_id=user_id)
+        if not post:
+            raise ValueError("Post not found")
+        return post
+
+    def add_comment(self, user_id: int, post_id: int, body: str) -> Dict:
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("Write a comment first")
+        if len(body) > 400:
+            raise ValueError("Comment is too long")
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
+                raise ValueError("Post not found")
+            conn.execute(
+                """
+                INSERT INTO comments (user_id, post_id, body, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, post_id, body, now),
+            )
+        post = self.get_post(post_id, viewer_id=user_id)
+        if not post:
+            raise ValueError("Post not found")
+        return post
 
     def feed_for_user(self, user_id: int, limit: int = 50) -> List[Dict]:
-        """Posts from self + accepted friends, newest first."""
+        """Posts from accepted friends, newest first. Your own posts stay on your profile."""
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name
+                SELECT p.*, u.username, u.display_name, u.avatar_path
                 FROM posts p
                 JOIN users u ON u.id = p.user_id
-                WHERE p.user_id = ?
-                   OR p.user_id IN (
-                        SELECT CASE
-                            WHEN requester_id = ? THEN addressee_id
-                            ELSE requester_id
-                        END
-                        FROM friendships
-                        WHERE status = 'accepted'
-                          AND (requester_id = ? OR addressee_id = ?)
-                   )
+                WHERE p.user_id IN (
+                    SELECT CASE
+                        WHEN requester_id = ? THEN addressee_id
+                        ELSE requester_id
+                    END
+                    FROM friendships
+                    WHERE status = 'accepted'
+                      AND (requester_id = ? OR addressee_id = ?)
+                )
                 ORDER BY p.created_at DESC
                 LIMIT ?
                 """,
-                (user_id, user_id, user_id, user_id, limit),
+                (user_id, user_id, user_id, limit),
             ).fetchall()
-        return [self._post_public(r) for r in rows]
+        return [self._post_public(r, user_id) for r in rows]
 
-    def _post_public(self, row) -> Dict:
+    def _post_public(self, row, viewer_id: int = None) -> Dict:
+        keys = row.keys()
+        avatar_path = row["avatar_path"] if "avatar_path" in keys else None
+        post_id = row["id"]
+        with self._conn() as conn:
+            like_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM likes WHERE post_id = ?",
+                (post_id,),
+            ).fetchone()["n"]
+            liked = False
+            my_rating = None
+            if viewer_id:
+                liked = conn.execute(
+                    "SELECT 1 FROM likes WHERE post_id = ? AND user_id = ?",
+                    (post_id, viewer_id),
+                ).fetchone() is not None
+                mine = conn.execute(
+                    "SELECT score FROM ratings WHERE post_id = ? AND user_id = ?",
+                    (post_id, viewer_id),
+                ).fetchone()
+                my_rating = int(mine["score"]) if mine else None
+            rating = conn.execute(
+                "SELECT AVG(score) AS average_rating, COUNT(*) AS n FROM ratings WHERE post_id = ?",
+                (post_id,),
+            ).fetchone()
+            rating_count = int(rating["n"] or 0)
+            comments = conn.execute(
+                """
+                SELECT * FROM (
+                    SELECT c.id, c.user_id, c.body, c.created_at,
+                           u.username, u.display_name, u.avatar_path
+                    FROM comments c
+                    JOIN users u ON u.id = c.user_id
+                    WHERE c.post_id = ?
+                    ORDER BY c.created_at DESC
+                    LIMIT 30
+                )
+                ORDER BY created_at ASC
+                """,
+                (post_id,),
+            ).fetchall()
+            comment_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM comments WHERE post_id = ?",
+                (post_id,),
+            ).fetchone()["n"]
         return {
-            "id": row["id"],
+            "id": post_id,
             "user_id": row["user_id"],
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
+            "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,
             "image_url": f"/uploads/{os.path.basename(row['image_path'])}",
             "caption": row["caption"] or "",
             "location_name": row["location_name"] or "",
             "sunset_date": row["sunset_date"] or "",
             "aesthetic_score": row["aesthetic_score"],
+            "created_at": row["created_at"],
+            "like_count": int(like_count or 0),
+            "liked": liked,
+            "rating_average": round(float(rating["average_rating"]), 1) if rating_count else None,
+            "rating_count": rating_count,
+            "my_rating": my_rating,
+            "comment_count": int(comment_count or 0),
+            "comments": [self._comment_public(c) for c in comments],
+        }
+
+    def _comment_public(self, row) -> Dict:
+        avatar_path = row["avatar_path"] if "avatar_path" in row.keys() else None
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "username": row["username"],
+            "display_name": row["display_name"] or row["username"],
+            "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,
+            "body": row["body"],
             "created_at": row["created_at"],
         }

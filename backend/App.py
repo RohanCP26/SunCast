@@ -250,6 +250,7 @@ def health():
     return jsonify({
         'status': 'healthy',
         'model_loaded': ML_MODEL.trained if ML_MODEL else False,
+        'pipeline_ready': PREDICTION_PIPELINE is not None,
         'timestamp': datetime.now().isoformat()
     })
 

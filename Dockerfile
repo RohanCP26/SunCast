@@ -19,10 +19,12 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     MALLOC_ARENA_MAX=2
 COPY backend/requirements.txt .
-RUN pip install --only-binary=:all: "numpy==2.5.3" \
- && pip install --only-binary=:all: "scipy==1.18.1" \
- && pip install --only-binary=:all: "pandas==2.2.3" \
- && pip install --only-binary=:all: "joblib==1.6.0" "scikit-learn==1.9.1" \
+# These versions publish Python 3.11 wheels. numpy 2.5 and scipy 1.18 do not,
+# and --only-binary makes that a hard build failure on the Railway image.
+RUN pip install --only-binary=:all: "numpy==2.4.6" \
+ && pip install --only-binary=:all: "scipy==1.17.1" \
+ && pip install --only-binary=:all: "pandas==2.3.3" \
+ && pip install --only-binary=:all: "joblib==1.4.2" "scikit-learn==1.9.1" \
  && pip install --only-binary=:all: -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/build /app/frontend_build

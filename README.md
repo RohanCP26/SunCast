@@ -75,6 +75,14 @@ npm run build && npx cap sync ios
 
 Open `frontend/ios/App/App.xcodeproj` in Xcode and run it on the device. `npm run mobile:ios` builds, syncs, and opens the Xcode project. Android follows the same pattern with `npm run mobile:android`.
 
+## Deploying on Railway
+
+Railway’s default builder, Railpack, only starts a build when it can tell what kind of app the repo is. This repo has a Python API in `backend/` and a React app in `frontend/`, and neither `requirements.txt` nor `package.json` used to sit at the root, so Railpack stopped during “prepare” and never ran a build.
+
+The repo now includes a root `requirements.txt`, a `railpack.json` that installs Python 3.11, builds the frontend, and starts the API, and a `Dockerfile` that does the same thing in one image. `railway.toml` tells Railway to use that Dockerfile. The hosted site serves the React app and the API from the same host, so the browser calls `/api/...` on the Railway URL.
+
+Push these files to the GitHub branch Railway is deploying, then redeploy. In the service settings, the builder should be Dockerfile. The health check is `/api/health`.
+
 ## Run it locally
 
 Backend, from the repo root:

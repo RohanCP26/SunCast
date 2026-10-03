@@ -1,0 +1,345 @@
+.social-page {
+  width: min(100%, 1080px);
+  margin: 0 auto;
+  padding: 1.5rem clamp(1.25rem, 4vw, 2rem) 3rem;
+  color: #1a1520;
+  font-family: 'Manrope', system-ui, sans-serif;
+}
+
+.social-hero {
+  margin-bottom: 1.5rem;
+}
+
+.social-hero h2 {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 400;
+  margin: 0.2rem 0 0.4rem;
+}
+
+.social-hero .eyebrow {
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(26, 21, 32, 0.45);
+}
+
+.social-auth,
+.compose,
+.friends-panel {
+  background: #fffaf6;
+  border: 1px solid rgba(26, 21, 32, 0.1);
+  padding: 1.1rem 1.2rem;
+}
+
+.social-auth {
+  max-width: 420px;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.auth-tabs button,
+.social-auth button[type='submit'],
+.compose button,
+.friend-search button,
+.friend-row button {
+  border: none;
+  background: #3a2438;
+  color: #fff5ec;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.65rem 0.9rem;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.auth-tabs button.active {
+  background: #e36a2c;
+}
+
+.auth-tabs button:not(.active) {
+  background: transparent;
+  color: #1a1520;
+  border: 1px solid rgba(26, 21, 32, 0.15);
+}
+
+.hero-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.back-link {
+  padding-left: 0;
+  margin-bottom: 0.35rem;
+}
+
+.profile-head {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.25rem;
+  align-items: center;
+  background: #fffaf6;
+  border: 1px solid rgba(26, 21, 32, 0.1);
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.avatar-wrap {
+  display: grid;
+  justify-items: center;
+  gap: 0.55rem;
+}
+
+.avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #3a2438;
+  color: #fff5ec;
+  display: grid;
+  place-items: center;
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-size: 2.2rem;
+}
+
+.avatar-sm {
+  width: 40px;
+  height: 40px;
+  font-size: 1.1rem;
+  flex: none;
+}
+
+.change-photo {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #c44f1a;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.change-photo input {
+  display: none;
+}
+
+.profile-identity {
+  display: grid;
+  justify-items: start;
+  gap: 0.15rem;
+}
+
+.profile-identity h3 {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 1.8rem;
+  margin: 0;
+}
+
+.username {
+  margin: 0.15rem 0 0.35rem;
+  color: rgba(26, 21, 32, 0.55);
+}
+
+.friend-count {
+  display: inline-block;
+  margin-top: 0.45rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #c44f1a;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.profile-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.profile-identity .row-actions button,
+.post-meta .row-actions button {
+  border: none;
+  background: #3a2438;
+  color: #fff5ec;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.55rem 0.85rem;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.profile-identity .row-actions button.ghost,
+.post-meta .row-actions button.ghost {
+  background: transparent;
+  color: #c44f1a;
+}
+
+.friend-list .friend-row {
+  justify-content: flex-start;
+}
+
+.friend-name {
+  display: grid;
+}
+
+.social-auth label,
+.compose label,
+.profile-form label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(26, 21, 32, 0.55);
+}
+
+.social-auth input,
+.compose input,
+.compose textarea,
+.profile-form input,
+.profile-form textarea,
+.friend-search input {
+  border: none;
+  border-bottom: 1px solid rgba(26, 21, 32, 0.2);
+  background: transparent;
+  font: inherit;
+  font-size: 1rem;
+  color: #1a1520;
+  padding: 0.4rem 0;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.social-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.compose,
+.friends-panel {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+}
+
+.compose h3,
+.friends-panel h3,
+.feed h3 {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 1.35rem;
+}
+
+.friend-search {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.4rem;
+}
+
+.friend-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid rgba(26, 21, 32, 0.08);
+  font-size: 0.95rem;
+}
+
+.row-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.friend-row button.ghost,
+.text-btn {
+  background: transparent;
+  color: #c44f1a;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  padding: 0.35rem 0.5rem;
+}
+
+.friend-block {
+  margin-top: 0.75rem;
+}
+
+.muted {
+  color: rgba(26, 21, 32, 0.5);
+  font-size: 0.9rem;
+}
+
+.social-error {
+  color: #8f3418;
+  margin: 0.5rem 0 1rem;
+}
+
+.social-notice {
+  margin: 0;
+  color: #c44f1a;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.friend-row button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.feed {
+  display: grid;
+  gap: 1rem;
+}
+
+.post-card {
+  background: #fffaf6;
+  border: 1px solid rgba(26, 21, 32, 0.08);
+  overflow: hidden;
+}
+
+.post-card img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  display: block;
+  background: #1a1220;
+}
+
+.post-meta {
+  padding: 0.9rem 1rem 1.1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.post-meta span {
+  color: rgba(26, 21, 32, 0.55);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 800px) {
+  .social-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .profile-head {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+}

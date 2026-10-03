@@ -1,0 +1,9 @@
+backend/uploads/
+backend/data/
+frontend/ios/
+frontend/android/
+frontend/build/
+.env
+*.pyc
+__pycache__/
+.DS_Store

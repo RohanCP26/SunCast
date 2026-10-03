@@ -13,8 +13,17 @@ RUN npm run build
 FROM python:3.11-slim
 
 WORKDIR /app
+# Railway kills the build with exit 137 when pip unpacks numpy, scipy,
+# pandas, and scikit-learn in one process. Install the large wheels one at a time.
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MALLOC_ARENA_MAX=2
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --only-binary=:all: "numpy==1.24.0" \
+ && pip install --only-binary=:all: "scipy==1.11.0" \
+ && pip install --only-binary=:all: "pandas==2.0.0" \
+ && pip install --only-binary=:all: "scikit-learn==1.3.0" "joblib==1.3.0" \
+ && pip install --only-binary=:all: -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/build /app/frontend_build
 

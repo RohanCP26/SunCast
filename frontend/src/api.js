@@ -1,6 +1,5 @@
-// A phone's localhost is the phone itself. The native app must use this Mac's Wi-Fi address.
-// If the computer's IP changes, update DEVICE_API_BASE and frontend/.env.production, then rebuild.
-const DEVICE_API_BASE = 'http://10.0.0.73:5001';
+// The iPhone build talks to the hosted Railway API. Browser dev still uses localhost.
+const DEVICE_API_BASE = 'https://suncast-production.up.railway.app';
 
 function resolveApiBase() {
   // An explicit empty value means "same host" (the Railway deploy).
@@ -41,7 +40,7 @@ export async function apiJson(path, options = {}) {
   } catch (err) {
     const hint = !base || base.includes('localhost')
       ? 'Start the backend with: cd backend && ../venv/bin/python App.py'
-      : 'Keep the backend running on your computer, and keep this phone on the same Wi-Fi.';
+      : 'Check that the hosted API is up, then try again.';
     throw new Error(`Cannot reach SunCast API at ${base || 'this site'}. ${hint}`);
   }
   const data = await res.json().catch(() => ({}));

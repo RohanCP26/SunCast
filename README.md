@@ -1,484 +1,105 @@
-# Sunset Prediction: ML-Powered Visual Forecasting
+# SunCast
 
-A machine learning system that predicts what sunsets will look like based on atmospheric conditions, paired with generative AI for photo-realistic image creation.
+SunCast is a weekly sunset forecast. You give it a place, and it returns seven days of weather around sunset, a 1–10 aesthetic score for each evening, nearby viewpoints, and an optional picture of what that sky might look like. A second tab lets people share those evenings with friends.
 
----
+The app is a React interface talking to a Flask API. The same interface runs in a browser and, through Capacitor, as an iPhone or Android app.
 
-## 📋 Architecture Overview
+## How a forecast is made
 
-### The Problem
+Opening the Forecast tab starts this chain.
 
-Traditional sunset prediction apps (like SunsetHue) use simple heuristics:
-- "If cloud cover > 60% and humidity > 75%, the sunset will be orange"
+1. **Place.** On launch the app asks the device for its location. In the browser that is the Geolocation API. On a phone it is the Capacitor geolocation plugin, which also asks for permission. The coordinates are turned into a place name. If location is unavailable, the forecast starts at Austin, Texas. Typing a city and submitting uses that name instead, and the backend looks up the coordinates so the label and the weather stay on the same place.
 
-These rules miss the subtle interactions between atmospheric conditions and visual characteristics.
+2. **Weather near sunset.** `POST /api/week` asks Open-Meteo for an hourly forecast and for each day's sunset time. The pipeline keeps the hour closest to sunset, not the conditions right now and not the daily high. Cloud cover, humidity, wind, visibility, temperature, pressure, and the chance of rain from that hour are what the rest of the forecast is based on.
 
-### The Solution
+3. **What the sky will look like.** Those numbers, plus a simple season value, go into a gradient-boosting model. The model predicts four visual properties: hue (where the color sits from red through gold), saturation, brightness, and cloud density. A saved model is loaded from `model/sunset_model_real_v1.pkl` when that file is present. If it is missing, the server trains a stand-in model from synthetic samples so the API can still answer.
 
-**Two-tier approach:**
+4. **The 1–10 score.** The aesthetic score is not a second weather model. It is a weighted reading of the visual prediction: vivid color, brightness, warm red-to-gold hues, and partial cloud cover (about 20–55%) raise the score. A clear sky or a heavy overcast lowers it. Visibility adds a small amount. The result is clipped to 1–10 and labeled Muted, Fair, Good, Excellent, or Exceptional. The highest day in the week is marked as the best evening.
 
-1. **Gradient Boosting (MVP)** - Launch in 1-2 weeks
-   - Input: Weather numbers (cloud %, humidity, wind speed, visibility, aerosols)
-   - Output: Visual parameters (hue shift, saturation, brightness, cloud density)
-   - Feed to: Stable Diffusion for image generation
+5. **Viewpoints.** The same coordinates are sent to `POST /api/viewpoints`. OpenStreetMap is searched for viewpoints and peaks within about 25 km. Open-Meteo supplies elevation. Each spot comes back with distance, compass direction, and a maps link. If nothing is mapped nearby, the API suggests heading toward open west-facing ground.
 
-2. **CNN-based Model (Long-term)** - Deploy in 2-3 months
-   - Input: Sunset photos + weather data
-   - Output: Visual embeddings learned from real sunset images
-   - Advantage: Learns actual visual patterns, not heuristics
+6. **A picture of the evening.** Each day also gets a short visual description and a text prompt built from the predicted colors and the place name. `POST /api/generate-image` turns that prompt into an image. If a Replicate token is set, it uses a hosted text-to-image model. Otherwise it tries Pollinations, and if that is unavailable it paints a sky locally with Pillow from the hue, saturation, brightness, and cloud values, so the screen still has a picture.
 
----
+7. **On a phone, a reminder.** If the app is running natively and any evening scores 7.5 or higher, it schedules a local notification for 3:00 p.m. on that day. The note names the score, the place, and the top viewpoint. This does not run in the browser.
 
-## 📁 Files & What They Do
+The week strip, the selected day's weather, the color preview, the viewpoint list, and the rendition are all views of that one response. Changing the place runs the chain again.
 
-### 1. `sunset_data_pipeline.py`
+## The two screens
 
-**Purpose:** Fetches atmospheric data and structures it for ML training.
+`frontend/src/App.jsx` is the shell: a Forecast tab, a Social tab, and the footer. Forecast is `sunsetPredictor.jsx`. Social is `Social.jsx`. Both call the API through `frontend/src/api.js`.
 
-**Key Classes:**
+### Forecast
 
-```python
-pipeline = SunsetDataPipeline()
+The hero accepts a place name or a "use my location" request. The week strip shows each day's score. Selecting a day shows sunset time, the weather snapshot from that evening, the predicted colors, and the viewpoints. Asking for a rendition sends that day's prompt and color values to the API. The handler that returns an image URL is `POST /api/generate-image`.
 
-# Calculate solar geometry (elevation, azimuth, sunset time)
-solar_geo = pipeline.calculate_solar_geometry(
-    lat=40.7128,  # NYC
-    lon=-74.0060,
-    date=datetime.now()
-)
+### Social
 
-# Fetch NWS forecast (NOAA API)
-forecast = pipeline.fetch_nws_forecast(40.7128, -74.0060)
+Social is a separate store, not a feature of the weather model. Accounts, friendships, and posts live in SQLite at `backend/data/suncast_social.db`. Photos sit in `backend/uploads` and are served at `/uploads/<filename>`.
 
-# Fetch OpenWeatherMap forecast (alternative)
-owm_forecast = pipeline.fetch_openweather_forecast(40.7128, -74.0060)
+- Sign in or create an account. The session is a bearer token kept in the browser as `suncast_token`.
+- Search for someone by name or username and send a friend request. Sent requests stay listed as pending. If that person already requested you, adding them accepts the request.
+- Incoming requests can be accepted or declined.
+- Post a sunset photo with a place and a caption. The feed shows your posts and posts from accepted friends.
+- Your profile holds your photo, name, and username, every post you can edit, and a friend count that opens the full friends list.
 
-# Create training dataset from historical data
-training_df = pipeline.create_training_dataset(
-    locations=[(40.7128, -74.0060, "New York"), ...],
-    start_date=datetime(2023, 1, 1),
-    end_date=datetime(2023, 12, 31)
-)
-```
+## Where the code lives
 
-**Features Engineered:**
+| Piece | Role |
+| --- | --- |
+| `frontend/src/App.jsx` | Tabs and page chrome |
+| `frontend/src/sunsetPredictor.jsx` | Week forecast, viewpoints, rendition |
+| `frontend/src/deviceLocation.js` | GPS on the web and on a phone, then a place name |
+| `frontend/src/notifications.js` | Local alerts for high-scoring evenings on a phone |
+| `frontend/src/Social.jsx` | Accounts, friends, feed, profile |
+| `frontend/src/api.js` | API address, auth header, and fetch helper |
+| `backend/App.py` | Flask API that joins weather, the model, images, viewpoints, and social |
+| `backend/model/sunset_data_pipeline.py` | Geocoding, Open-Meteo forecast, sunset-hour snapshots, solar geometry |
+| `backend/model/sunset_ml_models.py` | Gradient-boosting model, prompt text, and the 1–10 score |
+| `backend/model/image_generator.py` | Hosted image APIs, with a local Pillow sky as the fallback |
+| `backend/viewpoints.py` | Overlooks and peaks from OpenStreetMap |
+| `backend/social_store.py` | Users, friendships, and posts |
+| `frontend/ios` and `frontend/android` | Capacitor shells that load the built web app |
 
-| Feature | Description | Source |
-|---------|-------------|--------|
-| `solar_elevation_angle` | Sun's angle above horizon at sunset | Calculated |
-| `sunset_azimuth` | Compass direction of sunset (0-360°) | Calculated |
-| `avg_cloud_cover` | % of sky covered by clouds | Weather API |
-| `avg_humidity` | Relative humidity (%) | Weather API |
-| `avg_wind_speed` | Wind speed (mph/kph) | Weather API |
-| `avg_visibility` | Visibility distance (km) | Weather API |
-| `aerosol_proxy` | Proxy for aerosol optical depth | Computed |
-| `season` | Season (0-3) | Calculated |
+`SunsetCNNModel` in the model file is an unused sketch. The running forecast uses gradient boosting only.
 
-### 2. `sunset_ml_models.py`
+## Browser and phone
 
-**Purpose:** ML models for predicting sunset appearance.
+In the browser the API is `http://localhost:5001`. The Flask app listens on all interfaces, port 5001.
 
-**Two Model Classes:**
-
-#### A. `SunsetGradientBoostingModel` (MVP)
-
-```python
-from sunset_ml_models import SunsetGradientBoostingModel
-
-# Create model
-model = SunsetGradientBoostingModel(n_estimators=100)
-
-# Train on feature data
-model.train(training_df)
-
-# Make predictions
-weather = {
-    'cloud_cover': 45,
-    'humidity': 75,
-    'wind_speed': 8,
-    'visibility': 12,
-    'aerosol_proxy': 25,
-    # ... other features
-}
-
-predictions = model.predict_single(weather)
-# Returns: {
-#   'hue_shift': 35,        # Orange
-#   'saturation': 0.92,     # Vivid
-#   'brightness': 0.8,      # Moderately bright
-#   'cloud_density': 0.6    # Some clouds
-# }
-
-# Save/load model
-model.save("sunset_model.pkl")
-model.load("sunset_model.pkl")
-```
-
-**Output Targets:**
-
-| Target | Range | Meaning |
-|--------|-------|---------|
-| `hue_shift` | 0-360° | Primary color (0=red, 60=yellow, 120=green, 240=blue) |
-| `saturation` | 0.0-1.0 | Color vividness (0=grayscale, 1=pure color) |
-| `brightness` | 0.0-1.0 | Overall luminosity |
-| `cloud_density` | 0.0-1.0 | Fraction of sky with clouds |
-
-#### B. `SunsetCNNModel` (Future)
-
-```python
-from sunset_ml_models import SunsetCNNModel
-
-model = SunsetCNNModel(backbone='resnet50', embedding_dim=256)
-
-# Architecture:
-# Input: Sunset photo (256x256 RGB) + Weather features (10-dim)
-#   ↓
-# ResNet50 backbone (ImageNet pretrained)
-#   ↓
-# Weather fusion layer (concatenate)
-#   ↓
-# Dense head (→ 256-dim embedding)
-#   ↓
-# Output: Visual embedding for Stable Diffusion
-```
-
-### 3. `SunsetPredictionPipeline`
-
-**End-to-end inference pipeline:**
-
-```python
-from sunset_ml_models import SunsetPredictionPipeline
-
-# Create pipeline
-pipeline = SunsetPredictionPipeline(use_cnn=False)  # MVP version
-pipeline.model.train(training_df)
-
-# Get prediction with auto-generated prompt
-result = pipeline.predict_sunset_appearance({
-    'cloud_cover': 45,
-    'humidity': 72,
-    'wind_speed': 8,
-    'visibility': 12,
-    'aerosol_proxy': 25,
-    # ...
-})
-
-print(result['image_generation_prompt'])
-# Output:
-# "A stunning vibrant and rich sunset with pale yellow transitioning to blue 
-#  hues across the sky. The partially covered by clouds catching the last 
-#  light of day. Professional landscape photography, atmospheric lighting..."
-
-# Feed prompt to Stable Diffusion
-# image = generate_with_stable_diffusion(result['image_generation_prompt'])
-```
-
----
-
-## 🚀 Quick Start Guide
-
-### Step 1: Install Dependencies
+A phone cannot use localhost, because that name means the phone itself. The native build uses the computer's Wi-Fi address in `frontend/src/api.js` (`DEVICE_API_BASE`) and in `frontend/.env.production` (`REACT_APP_API_URL`). The phone and the computer need to be on the same Wi-Fi, and the backend has to be running before the app is opened. If the computer's IP changes, update both places, then rebuild and sync:
 
 ```bash
-pip install numpy pandas scikit-learn requests scipy
+cd frontend
+npm run build && npx cap sync ios
 ```
 
-### Step 2: Generate Training Data
+Open `frontend/ios/App/App.xcodeproj` in Xcode and run it on the device. `npm run mobile:ios` builds, syncs, and opens the Xcode project. Android follows the same pattern with `npm run mobile:android`.
 
-```python
-from sunset_data_pipeline import SunsetDataPipeline
-from datetime import datetime, timedelta
+## Run it locally
 
-pipeline = SunsetDataPipeline()
-
-# Create dataset for 5 US cities, January 2023
-locations = [
-    (40.7128, -74.0060, "New York"),
-    (34.0522, -118.2437, "Los Angeles"),
-    (41.8781, -87.6298, "Chicago"),
-    (29.7604, -95.3698, "Houston"),
-    (33.7490, -84.3880, "Atlanta"),
-]
-
-training_df = pipeline.create_training_dataset(
-    locations=locations,
-    start_date=datetime(2023, 1, 1),
-    end_date=datetime(2023, 1, 31)
-)
-
-pipeline.export_to_csv(training_df, "training_data.csv")
-```
-
-### Step 3: Train Model
-
-```python
-from sunset_ml_models import SunsetGradientBoostingModel
-import pandas as pd
-
-# Load training data
-df = pd.read_csv("training_data.csv")
-
-# Create and train model
-model = SunsetGradientBoostingModel()
-model.train(df)
-
-# Save for later use
-model.save("sunset_model_v1.pkl")
-```
-
-### Step 4: Make Predictions
-
-```python
-from sunset_ml_models import SunsetPredictionPipeline
-
-# Load model
-pipeline = SunsetPredictionPipeline()
-pipeline.model.load("sunset_model_v1.pkl")
-
-# Get tomorrow's forecast from OpenWeatherMap
-# Then predict sunset appearance
-result = pipeline.predict_sunset_appearance({
-    'cloud_cover': 35,
-    'humidity': 65,
-    'wind_speed': 10,
-    'visibility': 14,
-    'aerosol_proxy': 20,
-    'solar_elevation': 3,
-    'sunset_azimuth': 285,
-    'season': 2,  # Summer
-})
-
-print("Sunset Prediction:")
-print(f"  Hue: {result['hue_shift']:.0f}°")
-print(f"  Saturation: {result['saturation']:.2f}")
-print(f"  Brightness: {result['brightness']:.2f}")
-print(f"  Cloud coverage: {result['cloud_density']:.2f}")
-print(f"\nGenerated prompt for image generation:")
-print(result['image_generation_prompt'])
-```
-
----
-
-## 🔗 Data Sources
-
-### NOAA (National Oceanic and Atmospheric Administration)
-
-1. **Historical Weather Data**
-   - Source: https://www.ncei.noaa.gov/cdo-web/
-   - Free, requires signup
-   - 30+ years of daily weather observations
-   - Download as CSV for specific stations
-
-2. **National Weather Service Forecast**
-   - API: https://api.weather.gov/
-   - Free, no key required
-   - Hourly forecasts for next 7 days
-   - Includes cloud cover, visibility, temperature, wind
-
-### OpenWeatherMap
-
-- API: https://api.openweathermap.org/data/2.5/forecast
-- Free tier: 5-day forecast, 3-hour intervals
-- Requires API key (free account at openweathermap.org)
-- Cloud cover as percentage (0-100%)
-
-### Sentinel-2 / Landsat (Advanced)
-
-- Free satellite imagery
-- Cloud cover classification at 10m resolution
-- Useful for regional aerosol/dust detection
-- Requires GIS processing (GDAL, rasterio)
-
----
-
-## 🔄 Full Data Pipeline Flow
-
-```
-┌─────────────────────────────────────────────────────┐
-│ 1. DATA COLLECTION                                  │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  Historical Weather        Real-time Forecast        │
-│  (NOAA Archives)          (NWS API / OpenWeatherMap)│
-│     ↓                              ↓                 │
-│  CSV downloads      →      API calls (hourly)       │
-│     ↓                              ↓                 │
-└─────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────┐
-│ 2. FEATURE ENGINEERING                              │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  Solar Geometry Calculation:                        │
-│  - Sunset time, azimuth, elevation angle            │
-│  - Twilight duration, sun declination               │
-│                                                       │
-│  Weather Features:                                  │
-│  - Cloud cover, humidity, wind, visibility          │
-│  - Aerosol optical depth (proxy)                    │
-│  - Temporal: season, time of year                   │
-│                                                       │
-│  Output: Feature matrix (N × 12 features)           │
-│                                                       │
-└─────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────┐
-│ 3. MODEL TRAINING (MVP: Gradient Boosting)          │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  Input: Feature matrix                              │
-│  Targets: hue_shift, saturation, brightness,        │
-│           cloud_density (labeled from photos)       │
-│                                                       │
-│  Algorithm: Gradient Boosting × 4 models            │
-│  Training time: ~5 minutes                          │
-│  Output: 4 trained models (100 estimators each)     │
-│                                                       │
-└─────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────┐
-│ 4. INFERENCE & PROMPT GENERATION                    │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  Input: Tomorrow's forecast                         │
-│  ↓                                                   │
-│  Model predictions:                                 │
-│    hue_shift: 45° (Orange)                          │
-│    saturation: 0.87 (Vivid)                         │
-│    brightness: 0.79 (Bright)                        │
-│    cloud_density: 0.35 (Some clouds)                │
-│  ↓                                                   │
-│  Rule-based prompt construction:                    │
-│    "A stunning vivid sunset with brilliant orange..." │
-│                                                       │
-└─────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────┐
-│ 5. IMAGE GENERATION (Stable Diffusion)              │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  Input: Generated prompt                            │
-│  ↓                                                   │
-│  Stable Diffusion                                   │
-│  (with sunset LoRA fine-tune)                       │
-│  ↓                                                   │
-│  Output: Photo-realistic sunset image               │
-│                                                       │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## 📊 Expected Model Performance
-
-### Gradient Boosting MVP
-
-- **Training time:** ~2-5 minutes
-- **Prediction time:** <10ms per sunset
-- **Accuracy (on held-out test set):**
-  - Hue shift: ±15-20° (R² ~0.65)
-  - Saturation: ±0.08 (R² ~0.58)
-  - Brightness: ±0.12 (R² ~0.52)
-  - Cloud density: ±0.15 (R² ~0.60)
-
-*Note: These are approximate based on synthetic training data.*
-
-### Competitive Advantage vs. SunsetHue
-
-| Aspect | SunsetHue | Your Model |
-|--------|-----------|-----------|
-| Prediction method | Rule-based heuristics | Machine learning |
-| Visual output | Color palette only | Photo-realistic images |
-| Accuracy | ±30° hue error | ±15° hue error |
-| Generalization | Limited to specific rules | Learns patterns from data |
-| Customization | Hard-coded rules | Retrained monthly |
-
----
-
-## 🛠️ Production Deployment
-
-### Environment Variables
+Backend, from the repo root:
 
 ```bash
-# .env
-OPENWEATHER_API_KEY=your_key_here
-NWS_API_ENABLED=true
-MODEL_PATH=/models/sunset_model_v1.pkl
+cd backend
+../venv/bin/python App.py
 ```
 
-### Running the Full Pipeline
+Frontend, in another terminal:
 
-```python
-from sunset_data_pipeline import SunsetDataPipeline
-from sunset_ml_models import SunsetPredictionPipeline
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Initialize
-pipeline = SunsetPredictionPipeline(use_cnn=False)
-pipeline.model.load(os.getenv("MODEL_PATH"))
-
-# Get forecast
-data_pipeline = SunsetDataPipeline(api_key=os.getenv("OPENWEATHER_API_KEY"))
-forecast = data_pipeline.fetch_nws_forecast(lat, lon)
-
-# Convert forecast to features
-features = data_pipeline.engineer_features(solar_geo, forecast)
-
-# Predict
-result = pipeline.predict_sunset_appearance(features)
-
-# Return to app
-return {
-    "image_prompt": result["image_generation_prompt"],
-    "confidence": result["confidence"],
-    "visual_characteristics": {
-        "hue": result["hue_shift"],
-        "saturation": result["saturation"],
-        "brightness": result["brightness"],
-    }
-}
+```bash
+cd frontend
+npm install
+npm start
 ```
 
----
+The site is at `http://localhost:3000`. Optional environment variables for the backend:
 
-## 🔮 Next Steps: CNN Upgrade
+| Variable | Effect |
+| --- | --- |
+| `PORT` | API port. Default `5001`. |
+| `MODEL_PATH` | Trained model file. Default `model/sunset_model_real_v1.pkl`. |
+| `REPLICATE_API_TOKEN` | Enables hosted image generation. Without it, the local sky renderer is used. |
+| `IMAGE_PROVIDER` | `auto`, `replicate`, or `pollinations`. |
+| `SOCIAL_DB_PATH` | SQLite file for accounts and posts. |
 
-Once MVP is live and gathering user data:
-
-1. **Collect Training Photos**
-   - Download sunset photos from Unsplash, Flickr (geotag + timestamp)
-   - Annotate with weather data from NOAA archives
-   - Target: 5,000+ labeled photos across US locations
-
-2. **Train CNN Model**
-   - Fine-tune ResNet50 on sunset classification
-   - Use contrastive learning to link visual features to weather conditions
-   - Training: A100 GPU, ~24 hours for 50 epochs
-
-3. **Integrate with Image Generation**
-   - Fine-tune Stable Diffusion with sunset LoRA
-   - Condition generation on CNN embeddings
-   - Enables photo-realistic image synthesis
-
-4. **Continuous Improvement**
-   - Collect user feedback (ratings, social shares)
-   - Retrain monthly with new data
-   - A/B test new visual parameters
-
----
-
-## 📚 References
-
-- NOAA API Documentation: https://www.ncei.noaa.gov/cdo-web/api/v2
-- National Weather Service API: https://api.weather.gov/
-- OpenWeatherMap API: https://openweathermap.org/api
-- Scikit-learn Gradient Boosting: https://scikit-learn.org/stable/modules/ensemble.html#gradient-boosting
-- Stable Diffusion: https://github.com/CompVis/stable-diffusion
-- Solar Geometry (Equation of Time): https://en.wikipedia.org/wiki/Equation_of_time
-
----
-
-**Built for sunset enthusiasts & machine learning practitioners.**
+Weather, geocoding, elevation, and map data come from Open-Meteo and OpenStreetMap and do not need keys.

@@ -197,9 +197,23 @@ def _run_day_prediction(weather: dict, prediction_date: datetime):
 # ROUTES
 # ============================================================================
 
+def _frontend_build_dir():
+    """React production build, when this process is serving the hosted app."""
+    configured = os.getenv("FRONTEND_BUILD")
+    if configured and os.path.isdir(configured):
+        return configured
+    sibling = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "build"))
+    if os.path.isdir(sibling):
+        return sibling
+    return None
+
+
 @app.route('/', methods=['GET'])
 def index():
-    """Health check"""
+    """The hosted app, or a JSON index when only the API is running."""
+    build = _frontend_build_dir()
+    if build and "text/html" in request.headers.get("Accept", ""):
+        return send_from_directory(build, "index.html")
     return jsonify({
         'status': 'ok',
         'message': 'Sunset Prediction API',
@@ -1045,6 +1059,18 @@ def _get_visual_description(prediction):
 # ERROR HANDLERS
 # ============================================================================
 
+@app.route('/<path:asset_path>', methods=['GET'])
+def frontend_file(asset_path):
+    """Static files from the React build. API routes stay on their own handlers."""
+    build = _frontend_build_dir()
+    if not build or asset_path.startswith('api/') or asset_path.startswith('uploads/'):
+        return jsonify({'error': 'Endpoint not found'}), 404
+    full = os.path.normpath(os.path.join(build, asset_path))
+    if not full.startswith(os.path.normpath(build)) or not os.path.isfile(full):
+        return jsonify({'error': 'Endpoint not found'}), 404
+    return send_from_directory(build, asset_path)
+
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': 'Endpoint not found'}), 404
@@ -1064,10 +1090,10 @@ if __name__ == '__main__':
     
     # Run Flask app
     port = int(os.getenv("PORT", 5001))
-    debug = os.getenv("DEBUG", "True") == "True"
+    debug = os.getenv("DEBUG", "False") == "True"
     
     print(f"\n🌅 Sunset Prediction API starting...")
     print(f"   Running on http://localhost:{port}")
     print(f"   Debug mode: {debug}\n")
     
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    app.run(host='0.0.0.0', port=port, debug=debug, use_reloader=False)

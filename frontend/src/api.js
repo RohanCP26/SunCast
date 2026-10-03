@@ -3,7 +3,10 @@
 const DEVICE_API_BASE = 'http://10.0.0.73:5001';
 
 function resolveApiBase() {
-  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
+  // An explicit empty value means "same host" (the Railway deploy).
+  // Unset keeps localhost in the browser and the Mac's Wi-Fi address on a phone.
+  const configured = process.env.REACT_APP_API_URL;
+  if (typeof configured === 'string') return configured.replace(/\/$/, '');
   if (typeof window === 'undefined') return 'http://localhost:5001';
   const native =
     window.location.protocol === 'capacitor:' ||
@@ -36,10 +39,10 @@ export async function apiJson(path, options = {}) {
       },
     });
   } catch (err) {
-    const hint = base.includes('localhost')
+    const hint = !base || base.includes('localhost')
       ? 'Start the backend with: cd backend && ../venv/bin/python App.py'
       : 'Keep the backend running on your computer, and keep this phone on the same Wi-Fi.';
-    throw new Error(`Cannot reach SunCast API at ${base}. ${hint}`);
+    throw new Error(`Cannot reach SunCast API at ${base || 'this site'}. ${hint}`);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

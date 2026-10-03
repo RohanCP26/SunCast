@@ -95,18 +95,24 @@ def initialize_models():
         
         print("Initializing ML model...")
         ML_MODEL = SunsetGradientBoostingModel()
-        
-        # Try to load trained model
+        # Create this before loading so a bad pickle cannot leave the API with no pipeline.
+        print("Initializing prediction pipeline...")
+        PREDICTION_PIPELINE = SunsetPredictionPipeline(use_cnn=False)
+
         model_path = os.getenv("MODEL_PATH", "model/sunset_model_real_v1.pkl")
         if os.path.exists(model_path):
             print(f"Loading trained model from {model_path}...")
-            ML_MODEL.load(model_path)
+            try:
+                ML_MODEL.load(model_path)
+            except Exception as load_error:
+                print(f"⚠️  Could not load {model_path}: {load_error}")
+                traceback.print_exc()
         else:
             print(f"⚠️  Model file not found at {model_path}")
             print("    Will train a new model on first request")
-        
-        print("Initializing prediction pipeline...")
-        PREDICTION_PIPELINE = SunsetPredictionPipeline(use_cnn=False)
+
+        if not ML_MODEL.trained:
+            train_model_if_needed()
         PREDICTION_PIPELINE.model = ML_MODEL
 
         print("Initializing image generator...")
@@ -183,6 +189,10 @@ def _features_from_weather(weather: dict, prediction_date: datetime) -> dict:
 
 def _run_day_prediction(weather: dict, prediction_date: datetime):
     """Run ML + aesthetic score for a single day's weather snapshot."""
+    if PREDICTION_PIPELINE is None:
+        initialize_models()
+    if PREDICTION_PIPELINE is None:
+        raise RuntimeError("Sunset model failed to start")
     features = _features_from_weather(weather, prediction_date)
     prediction = PREDICTION_PIPELINE.predict_sunset_appearance(features)
 
@@ -394,6 +404,10 @@ def predict():
         
         # Step 4: Make prediction
         print(f"Making prediction...")
+        if PREDICTION_PIPELINE is None:
+            initialize_models()
+        if PREDICTION_PIPELINE is None:
+            raise RuntimeError("Sunset model failed to start")
         prediction = PREDICTION_PIPELINE.predict_sunset_appearance(features)
 
         # cloud_density was not in training labels — derive from cloud cover
@@ -1084,10 +1098,10 @@ def server_error(error):
 # MAIN
 # ============================================================================
 
+# Load models on import so a process that imports App still has a pipeline.
+initialize_models()
+
 if __name__ == '__main__':
-    # Initialize models
-    initialize_models()
-    
     # Run Flask app
     port = int(os.getenv("PORT", 5001))
     debug = os.getenv("DEBUG", "False") == "True"

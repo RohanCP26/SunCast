@@ -19,10 +19,10 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     MALLOC_ARENA_MAX=2
 COPY backend/requirements.txt .
-RUN pip install --only-binary=:all: "numpy==1.24.0" \
- && pip install --only-binary=:all: "scipy==1.11.0" \
- && pip install --only-binary=:all: "pandas==2.0.0" \
- && pip install --only-binary=:all: "scikit-learn==1.3.0" "joblib==1.3.0" \
+RUN pip install --only-binary=:all: "numpy==2.5.3" \
+ && pip install --only-binary=:all: "scipy==1.18.1" \
+ && pip install --only-binary=:all: "pandas==2.2.3" \
+ && pip install --only-binary=:all: "joblib==1.6.0" "scikit-learn==1.9.1" \
  && pip install --only-binary=:all: -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/build /app/frontend_build

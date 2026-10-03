@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim AS web
 
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 COPY frontend/ ./
 # Empty means the browser calls the API on this same Railway host.
 # .env.production must not override a value already set in the environment.

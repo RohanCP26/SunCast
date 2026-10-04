@@ -112,7 +112,7 @@ const RateBar = ({ value, onChange }) => {
   );
 };
 
-const PostCard = ({ post, burstKey, onLike, onRate, onComment, onOpenProfile, children }) => {
+const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile, children }) => {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const lastTap = useRef(0);
@@ -139,7 +139,7 @@ const PostCard = ({ post, burstKey, onLike, onRate, onComment, onOpenProfile, ch
   };
 
   return (
-    <article className="post-card">
+    <article className="post-card" id={id}>
       <header className="post-head">
         <Avatar
           user={{ id: post.user_id, display_name: post.display_name, username: post.username, avatar_url: post.avatar_url }}
@@ -314,6 +314,33 @@ const Social = () => {
   useEffect(() => {
     restoreSession();
   }, [restoreSession]);
+
+  const openedPostId = view === 'post' ? activePost?.id : null;
+  useEffect(() => {
+    if (!openedPostId) return undefined;
+    const node = document.getElementById(`profile-post-${openedPostId}`);
+    if (!node) return undefined;
+    const pane = node.closest('.page-pane');
+    const align = () => {
+      const viewport = pane?.closest('.page-viewport');
+      if (viewport && pane.offsetHeight - viewport.clientHeight > 12) return false;
+      node.scrollIntoView({ block: 'start' });
+      return true;
+    };
+    if (align()) return undefined;
+    const observer = pane ? new ResizeObserver(() => {
+      if (align()) observer.disconnect();
+    }) : null;
+    if (pane && observer) observer.observe(pane);
+    const stop = window.setTimeout(() => {
+      node.scrollIntoView({ block: 'start' });
+      observer?.disconnect();
+    }, 520);
+    return () => {
+      observer?.disconnect();
+      window.clearTimeout(stop);
+    };
+  }, [openedPostId]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -578,6 +605,11 @@ const Social = () => {
   const rememberPost = (post, authorRating) => {
     setFeed((prev) => prev.map((item) => (item.id === post.id ? post : item)));
     setMyPosts((prev) => prev.map((item) => (item.id === post.id ? post : item)));
+    setViewedProfile((prev) => (
+      prev?.posts
+        ? { ...prev, posts: prev.posts.map((item) => (item.id === post.id ? post : item)) }
+        : prev
+    ));
     setActivePost((prev) => (prev && prev.id === post.id ? post : prev));
     if (authorRating && user && post.user_id === user.id) {
       setUser((current) => (current ? { ...current, ...authorRating } : current));
@@ -638,6 +670,7 @@ const Social = () => {
     if (view === 'post') {
       setActivePost(null);
       setView('profile');
+      window.scrollTo(0, 0);
       return;
     }
     if (view === 'friends') {
@@ -660,7 +693,7 @@ const Social = () => {
     compose: 'New post',
     profile: viewedProfile?.user?.display_name || 'Profile',
     friends: 'Friends',
-    post: 'Post',
+    post: activePost?.display_name || 'Posts',
   };
 
   if (restoring) {
@@ -970,63 +1003,69 @@ const Social = () => {
       )}
 
       {view === 'post' && activePost && (
-        <PostCard
-          post={activePost}
-          burstKey={bursts[activePost.id]}
-          onLike={toggleLike}
-          onRate={ratePost}
-          onComment={commentOn}
-          onOpenProfile={openUserProfile}
-        >
-          {editingPostId === activePost.id ? (
-            <form className="profile-form" onSubmit={savePost}>
-              <label>
-                Caption
-                <textarea
-                  rows={3}
-                  value={postDraft.caption}
-                  onChange={(e) => setPostDraft({ ...postDraft, caption: e.target.value })}
-                />
-              </label>
-              <label>
-                Location
-                <input
-                  value={postDraft.location_name}
-                  onChange={(e) => setPostDraft({ ...postDraft, location_name: e.target.value })}
-                />
-              </label>
-              <label>
-                Date
-                <input
-                  type="date"
-                  value={postDraft.sunset_date}
-                  onChange={(e) => setPostDraft({ ...postDraft, sunset_date: e.target.value })}
-                />
-              </label>
-              <div className="row-actions">
-                <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-                <button type="button" className="ghost" onClick={() => setEditingPostId(null)}>Cancel</button>
-              </div>
-            </form>
-          ) : (
-            <>
-              <p>
-                <strong>{activePost.display_name}</strong>
-                {' '}
-                {activePost.caption || 'Shared a sunset'}
-              </p>
-              <span className="muted">
-                {activePost.location_name || 'Unknown place'}
-                {activePost.sunset_date ? ` · ${activePost.sunset_date}` : ''}
-              </span>
-              {activePost.user_id === user.id && (
-                <button type="button" className="text-btn" onClick={() => startPostEdit(activePost)}>
-                  Edit post
-                </button>
+        <div className="feed profile-feed">
+          {(viewedProfile?.posts?.length ? viewedProfile.posts : myPosts).map((post) => (
+            <PostCard
+              key={post.id}
+              id={`profile-post-${post.id}`}
+              post={post}
+              burstKey={bursts[post.id]}
+              onLike={toggleLike}
+              onRate={ratePost}
+              onComment={commentOn}
+              onOpenProfile={openUserProfile}
+            >
+              {editingPostId === post.id ? (
+                <form className="profile-form" onSubmit={savePost}>
+                  <label>
+                    Caption
+                    <textarea
+                      rows={3}
+                      value={postDraft.caption}
+                      onChange={(e) => setPostDraft({ ...postDraft, caption: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Location
+                    <input
+                      value={postDraft.location_name}
+                      onChange={(e) => setPostDraft({ ...postDraft, location_name: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Date
+                    <input
+                      type="date"
+                      value={postDraft.sunset_date}
+                      onChange={(e) => setPostDraft({ ...postDraft, sunset_date: e.target.value })}
+                    />
+                  </label>
+                  <div className="row-actions">
+                    <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+                    <button type="button" className="ghost" onClick={() => setEditingPostId(null)}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                  <p>
+                    <strong>{post.display_name}</strong>
+                    {' '}
+                    {post.caption || 'Shared a sunset'}
+                  </p>
+                  <span className="muted">
+                    {post.location_name || 'Unknown place'}
+                    {post.sunset_date ? ` · ${post.sunset_date}` : ''}
+                  </span>
+                  {post.user_id === user.id && (
+                    <button type="button" className="text-btn" onClick={() => startPostEdit(post)}>
+                      Edit post
+                    </button>
+                  )}
+                </>
               )}
-            </>
-          )}
-        </PostCard>
+            </PostCard>
+          ))}
+        </div>
       )}
 
       {view === 'friends' && (

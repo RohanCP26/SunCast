@@ -148,7 +148,7 @@ function App() {
       >
         <div
           className={`page-track${dragging ? ' is-dragging' : ''}`}
-          style={{ transform: `translate3d(calc(${-index * 100}% + ${dragging ? dragX : 0}px), 0, 0)` }}
+          style={{ marginLeft: `calc(${-index * 100}% + ${dragging ? dragX : 0}px)` }}
         >
           <div className="page-pane" ref={forecastRef} inert={index !== 0} aria-hidden={index !== 0}>
             <SunsetPredictor />

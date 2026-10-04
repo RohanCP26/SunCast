@@ -450,6 +450,10 @@
   display: grid;
 }
 
+.profile-feed .post-card {
+  scroll-margin-top: calc(44px + 0.75rem + max(0.75rem, env(safe-area-inset-top)) + 56px);
+}
+
 .post-card {
   background: #fffaf6;
   border-bottom: 1px solid rgba(26, 21, 32, 0.08);

@@ -1,3 +1,5 @@
+import { loadAuthToken } from './authToken';
+
 // The iPhone build talks to the hosted Railway API. Browser dev still uses localhost.
 const DEVICE_API_BASE = 'https://suncast-production.up.railway.app';
 
@@ -18,8 +20,8 @@ export function apiUrl(path) {
   return `${resolveApiBase()}${path}`;
 }
 
-export function authHeaders(extra = {}) {
-  const token = localStorage.getItem('suncast_token');
+export async function authHeaders(extra = {}) {
+  const token = await loadAuthToken();
   return {
     ...extra,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -34,7 +36,7 @@ export async function apiJson(path, options = {}) {
       ...options,
       headers: {
         ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
-        ...authHeaders(options.headers || {}),
+        ...(await authHeaders(options.headers || {})),
       },
     });
   } catch (err) {
@@ -45,7 +47,9 @@ export async function apiJson(path, options = {}) {
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `API error ${res.status}`);
+    const error = new Error(data.error || `API error ${res.status}`);
+    error.status = res.status;
+    throw error;
   }
   return data;
 }

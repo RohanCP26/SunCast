@@ -721,6 +721,20 @@
   font-size: 1rem;
 }
 
+.avatar-btn,
+.friend-row button.avatar-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  min-height: 0;
+  width: auto;
+  flex: none;
+  line-height: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
 .friend-row button:disabled {
   opacity: 0.55;
   cursor: default;

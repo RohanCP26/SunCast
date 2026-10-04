@@ -1,17 +1,28 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiJson, apiUrl, authHeaders } from './api';
+import { clearAuthToken, loadAuthToken, setAuthToken } from './authToken';
 import './Social.css';
 
 const initialOf = (name) => (name || '?').trim().charAt(0).toUpperCase();
 
-const Avatar = ({ user, className = 'avatar' }) => {
-  if (user?.avatar_url) {
-    return <img className={className} src={apiUrl(user.avatar_url)} alt="" />;
-  }
-  return (
+const Avatar = ({ user, className = 'avatar', onClick, label }) => {
+  const face = user?.avatar_url ? (
+    <img className={className} src={apiUrl(user.avatar_url)} alt="" />
+  ) : (
     <span className={`${className} avatar-fallback`} aria-hidden="true">
       {initialOf(user?.display_name || user?.username)}
     </span>
+  );
+  if (!onClick) return face;
+  return (
+    <button
+      type="button"
+      className="avatar-btn"
+      onClick={onClick}
+      aria-label={label || `${user?.display_name || user?.username || 'User'}'s profile`}
+    >
+      {face}
+    </button>
   );
 };
 
@@ -101,7 +112,7 @@ const RateBar = ({ value, onChange }) => {
   );
 };
 
-const PostCard = ({ post, burstKey, onLike, onRate, onComment, children }) => {
+const PostCard = ({ post, burstKey, onLike, onRate, onComment, onOpenProfile, children }) => {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const lastTap = useRef(0);
@@ -131,8 +142,14 @@ const PostCard = ({ post, burstKey, onLike, onRate, onComment, children }) => {
     <article className="post-card">
       <header className="post-head">
         <Avatar
-          user={{ display_name: post.display_name, avatar_url: post.avatar_url }}
+          user={{ id: post.user_id, display_name: post.display_name, username: post.username, avatar_url: post.avatar_url }}
           className="avatar avatar-sm"
+          onClick={() => onOpenProfile?.({
+            id: post.user_id,
+            display_name: post.display_name,
+            username: post.username,
+            avatar_url: post.avatar_url,
+          })}
         />
         <div className="post-who">
           <strong>{post.display_name}</strong>
@@ -171,7 +188,11 @@ const PostCard = ({ post, burstKey, onLike, onRate, onComment, children }) => {
         <div className="comments">
           {(post.comments || []).map((comment) => (
             <div key={comment.id} className="comment">
-              <Avatar user={comment} className="avatar avatar-sm" />
+              <Avatar
+                user={comment}
+                className="avatar avatar-sm"
+                onClick={() => onOpenProfile?.(comment)}
+              />
               <p>
                 <strong>{comment.display_name}</strong> {comment.body}
                 <span className="muted">{timeLabel(comment)}</span>
@@ -232,6 +253,11 @@ const Social = () => {
   const [postDraft, setPostDraft] = useState({ caption: '', location_name: '', sunset_date: '' });
   const [activePost, setActivePost] = useState(null);
   const [bursts, setBursts] = useState({});
+  const [restoring, setRestoring] = useState(true);
+  const [restoreError, setRestoreError] = useState(null);
+  const [viewedProfile, setViewedProfile] = useState(null);
+  const [profileSource, setProfileSource] = useState('feed');
+  const restoreGeneration = useRef(0);
 
   const friendCount = (friends.friends || []).length;
   const requestCount = (friends.incoming || []).length;
@@ -258,14 +284,36 @@ const Social = () => {
     setMyPosts(data.posts || []);
   };
 
-  useEffect(() => {
-    const token = localStorage.getItem('suncast_token');
-    if (!token) return;
-    refresh().catch(() => {
-      localStorage.removeItem('suncast_token');
-      setUser(null);
-    });
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  const restoreSession = useCallback(async () => {
+    const generation = restoreGeneration.current + 1;
+    restoreGeneration.current = generation;
+    setRestoring(true);
+    setRestoreError(null);
+    try {
+      const token = await loadAuthToken();
+      if (generation !== restoreGeneration.current) return;
+      if (!token) return;
+      await refreshRef.current();
+    } catch (err) {
+      if (generation !== restoreGeneration.current) return;
+      if (err.status === 401) {
+        await clearAuthToken();
+        setUser(null);
+        setRestoreError(null);
+        return;
+      }
+      setRestoreError(err.message);
+    } finally {
+      if (generation === restoreGeneration.current) setRestoring(false);
+    }
   }, []);
+
+  useEffect(() => {
+    restoreSession();
+  }, [restoreSession]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -277,7 +325,7 @@ const Social = () => {
         method: 'POST',
         body: JSON.stringify(form),
       });
-      localStorage.setItem('suncast_token', data.token);
+      await setAuthToken(data.token);
       setUser(data.user);
       setView('feed');
       await refresh();
@@ -288,8 +336,8 @@ const Social = () => {
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem('suncast_token');
+  const logout = async () => {
+    await clearAuthToken();
     setUser(null);
     setFeed([]);
     setView('feed');
@@ -379,7 +427,7 @@ const Social = () => {
       body.append('sunset_date', new Date().toISOString().slice(0, 10));
       const res = await fetch(apiUrl('/api/social/posts'), {
         method: 'POST',
-        headers: authHeaders(),
+        headers: await authHeaders(),
         body,
       });
       const data = await res.json();
@@ -397,6 +445,8 @@ const Social = () => {
   };
 
   const openProfile = async () => {
+    setViewedProfile(null);
+    setProfileSource('feed');
     setView('profile');
     setEditingIdentity(false);
     setEditingPostId(null);
@@ -410,6 +460,36 @@ const Social = () => {
     }
   };
 
+  const openUserProfile = async (person) => {
+    const id = person?.id || person?.user_id;
+    if (!id || id === user.id) {
+      await openProfile();
+      return;
+    }
+    setProfileSource(view === 'profile' ? profileSource : view);
+    setEditingIdentity(false);
+    setEditingPostId(null);
+    setError(null);
+    setView('profile');
+    setViewedProfile({
+      user: {
+        id,
+        display_name: person.display_name,
+        username: person.username,
+        avatar_url: person.avatar_url,
+      },
+      posts: [],
+      loading: true,
+    });
+    try {
+      const data = await apiJson(`/api/social/users/${id}`);
+      setViewedProfile({ user: data.user, posts: data.posts || [], loading: false });
+    } catch (err) {
+      setViewedProfile((current) => (current ? { ...current, loading: false } : current));
+      setError(err.message);
+    }
+  };
+
   const changeAvatar = async (file) => {
     if (!file) return;
     setBusy(true);
@@ -419,7 +499,7 @@ const Social = () => {
       body.append('photo', file);
       const res = await fetch(apiUrl('/api/social/me/avatar'), {
         method: 'POST',
-        headers: authHeaders(),
+        headers: await authHeaders(),
         body,
       });
       const data = await res.json();
@@ -561,19 +641,54 @@ const Social = () => {
       return;
     }
     if (view === 'friends') {
+      setViewedProfile(null);
       setView('profile');
       return;
     }
+    if (view === 'profile' && viewedProfile) {
+      const backTo = profileSource && profileSource !== 'profile' ? profileSource : 'feed';
+      setViewedProfile(null);
+      setView(backTo);
+      return;
+    }
+    setViewedProfile(null);
     setView('feed');
   };
 
   const titles = {
     feed: 'Sunsets',
     compose: 'New post',
-    profile: 'Profile',
+    profile: viewedProfile?.user?.display_name || 'Profile',
     friends: 'Friends',
     post: 'Post',
   };
+
+  if (restoring) {
+    return (
+      <section className="social-page auth-view">
+        <header className="social-hero">
+          <p className="eyebrow">Community</p>
+          <h2>SunCast</h2>
+        </header>
+      </section>
+    );
+  }
+
+  if (!user && restoreError) {
+    return (
+      <section className="social-page auth-view">
+        <header className="social-hero">
+          <p className="eyebrow">Community</p>
+          <h2>Still signed in</h2>
+          <p>Couldn&apos;t reach SunCast just now. Your login is saved on this phone.</p>
+        </header>
+        <div className="social-auth">
+          <p className="social-error">{restoreError}</p>
+          <button type="button" className="share-btn" onClick={restoreSession}>Try again</button>
+        </div>
+      </section>
+    );
+  }
 
   if (!user) {
     return (
@@ -672,6 +787,7 @@ const Social = () => {
               onLike={toggleLike}
               onRate={ratePost}
               onComment={commentOn}
+              onOpenProfile={openUserProfile}
             >
               {post.caption ? (
                 <p><strong>{post.display_name}</strong> {post.caption}</p>
@@ -723,7 +839,52 @@ const Social = () => {
         </form>
       )}
 
-      {view === 'profile' && (
+      {view === 'profile' && viewedProfile && (
+        <div className="profile">
+          <div className="profile-top">
+            <Avatar user={viewedProfile.user} />
+            <div className="profile-stats" aria-label="Profile stats">
+              <div>
+                <strong>{viewedProfile.posts.length}</strong>
+                <span>posts</span>
+              </div>
+              <div>
+                <strong>{viewedProfile.user.friend_count || 0}</strong>
+                <span>friends</span>
+              </div>
+              <div title={viewedProfile.user.rating_count ? `From ${viewedProfile.user.rating_count} ratings` : 'No ratings yet'}>
+                <strong>{ratingLabel(viewedProfile.user.average_rating)}</strong>
+                <span>rating</span>
+              </div>
+            </div>
+          </div>
+          <div className="profile-bio">
+            <h3>{viewedProfile.user.display_name}</h3>
+            <p className="username">@{viewedProfile.user.username}</p>
+          </div>
+          {viewedProfile.loading ? (
+            <p className="muted empty-grid">Loading sunsets…</p>
+          ) : viewedProfile.posts.length === 0 ? (
+            <p className="muted empty-grid">No sunsets yet.</p>
+          ) : (
+            <div className="photo-grid">
+              {viewedProfile.posts.map((post) => (
+                <button
+                  key={post.id}
+                  type="button"
+                  className="grid-cell"
+                  onClick={() => openPost(post)}
+                  aria-label={post.caption || `Sunset by ${viewedProfile.user.display_name}`}
+                >
+                  <img src={apiUrl(post.image_url)} alt="" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {view === 'profile' && !viewedProfile && (
         <div className="profile">
           <div className="profile-top">
             <label className="avatar-wrap">
@@ -815,6 +976,7 @@ const Social = () => {
           onLike={toggleLike}
           onRate={ratePost}
           onComment={commentOn}
+          onOpenProfile={openUserProfile}
         >
           {editingPostId === activePost.id ? (
             <form className="profile-form" onSubmit={savePost}>
@@ -881,7 +1043,7 @@ const Social = () => {
           {notice && <p className="social-notice">{notice}</p>}
           {searchResults.map((person) => (
             <div key={person.id} className="friend-row">
-              <Avatar user={person} className="avatar avatar-sm" />
+              <Avatar user={person} className="avatar avatar-sm" onClick={() => openUserProfile(person)} />
               <span className="friend-name">
                 {person.display_name}
                 <span className="muted">@{person.username}</span>
@@ -903,7 +1065,7 @@ const Social = () => {
               <p className="eyebrow">Requests</p>
               {friends.incoming.map((person) => (
                 <div key={person.friendship_id} className="friend-row">
-                  <Avatar user={person} className="avatar avatar-sm" />
+                  <Avatar user={person} className="avatar avatar-sm" onClick={() => openUserProfile(person)} />
                   <span className="friend-name">
                     {person.display_name}
                     <span className="muted">@{person.username}</span>
@@ -922,7 +1084,7 @@ const Social = () => {
               <p className="eyebrow">Sent</p>
               {friends.outgoing.map((person) => (
                 <div key={person.friendship_id} className="friend-row">
-                  <Avatar user={person} className="avatar avatar-sm" />
+                  <Avatar user={person} className="avatar avatar-sm" onClick={() => openUserProfile(person)} />
                   <span className="friend-name">
                     {person.display_name}
                     <span className="muted">@{person.username}</span>
@@ -938,7 +1100,7 @@ const Social = () => {
             {friendCount === 0 && <p className="muted">No friends yet</p>}
             {(friends.friends || []).map((person) => (
               <div key={person.id} className="friend-row">
-                <Avatar user={person} className="avatar avatar-sm" />
+                <Avatar user={person} className="avatar avatar-sm" onClick={() => openUserProfile(person)} />
                 <span className="friend-name">
                   {person.display_name}
                   <span className="muted">@{person.username}</span>

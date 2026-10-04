@@ -925,6 +925,18 @@ def social_my_posts():
     return jsonify({'success': True, 'posts': SOCIAL.posts_for_user(user['id'])})
 
 
+@app.route('/api/social/users/<int:user_id>', methods=['GET'])
+def social_user_profile(user_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        profile = SOCIAL.public_profile(user_id, viewer_id=user['id'])
+        return jsonify({'success': True, **profile})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+
+
 @app.route('/api/social/users', methods=['GET'])
 def social_users():
     user, err = _require_user()

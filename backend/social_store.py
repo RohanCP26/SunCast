@@ -397,6 +397,26 @@ class SocialStore:
             post_id = cur.lastrowid
         return self.get_post(post_id, viewer_id=user_id)
 
+    def public_profile(self, user_id: int, viewer_id: int = None) -> Dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row:
+                raise ValueError("User not found")
+            friend_count = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM friendships
+                WHERE status = 'accepted'
+                  AND (requester_id = ? OR addressee_id = ?)
+                """,
+                (user_id, user_id),
+            ).fetchone()["n"]
+        user = self._user_public(row)
+        user["friend_count"] = int(friend_count or 0)
+        return {
+            "user": user,
+            "posts": self.posts_for_user(user_id, viewer_id=viewer_id),
+        }
+
     def posts_for_user(self, user_id: int, viewer_id: int = None) -> List[Dict]:
         with self._conn() as conn:
             rows = conn.execute(

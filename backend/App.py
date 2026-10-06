@@ -863,6 +863,8 @@ def social_register():
             data.get('username'),
             data.get('password'),
             data.get('display_name'),
+            data.get('email'),
+            data.get('phone'),
         )
         return jsonify({'success': True, **session})
     except ValueError as e:
@@ -873,10 +875,20 @@ def social_register():
 def social_login():
     data = request.get_json(silent=True) or {}
     try:
-        session = SOCIAL.login(data.get('username'), data.get('password'))
+        session = SOCIAL.login(data.get('username') or data.get('contact'), data.get('password'))
         return jsonify({'success': True, **session})
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 401
+
+
+@app.route('/api/social/password/reset', methods=['POST'])
+def social_reset_password():
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.reset_password(data.get('contact'), data.get('password'))
+        return jsonify({'success': True})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 
 @app.route('/api/social/me', methods=['GET'])
@@ -898,6 +910,9 @@ def social_update_me():
             user['id'],
             display_name=data.get('display_name'),
             username=data.get('username'),
+            email=data.get('email'),
+            phone=data.get('phone'),
+            update_contact='email' in data or 'phone' in data,
         )
         return jsonify({'success': True, 'user': updated})
     except ValueError as e:

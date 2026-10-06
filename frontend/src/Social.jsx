@@ -112,7 +112,7 @@ const RateBar = ({ value, onChange }) => {
   );
 };
 
-const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile, children }) => {
+const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile, showPlace = true, children }) => {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const lastTap = useRef(0);
@@ -153,7 +153,7 @@ const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile
         />
         <div className="post-who">
           <strong>{post.display_name}</strong>
-          <span>{post.location_name || 'Somewhere in the light'}</span>
+          {showPlace && <span>{post.location_name || 'Somewhere in the light'}</span>}
         </div>
         <time dateTime={post.created_at}>{timeLabel(post)}</time>
       </header>
@@ -233,7 +233,15 @@ const timeLabel = (post) => {
 const Social = () => {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState('login');
-  const [form, setForm] = useState({ username: '', password: '', display_name: '' });
+  const [form, setForm] = useState({
+    username: '',
+    password: '',
+    display_name: '',
+    email: '',
+    phone: '',
+    login_id: '',
+    confirm: '',
+  });
   const [feed, setFeed] = useState([]);
   const [friends, setFriends] = useState({ friends: [], incoming: [], outgoing: [] });
   const [friendQuery, setFriendQuery] = useState('');
@@ -244,6 +252,7 @@ const Social = () => {
   const [locationName, setLocationName] = useState('');
   const [photo, setPhoto] = useState(null);
   const [error, setError] = useState(null);
+  const [resetMessage, setResetMessage] = useState(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState('feed');
   const [myPosts, setMyPosts] = useState([]);
@@ -344,18 +353,55 @@ const Social = () => {
 
   const handleAuth = async (e) => {
     e.preventDefault();
+    if (authMode === 'register' && !form.email.trim() && !form.phone.trim()) {
+      setError('Add an email or a phone number so you can reset your password');
+      return;
+    }
     setBusy(true);
     setError(null);
+    setResetMessage(null);
     try {
       const path = authMode === 'login' ? '/api/social/login' : '/api/social/register';
+      const body = authMode === 'login'
+        ? { username: form.login_id, password: form.password }
+        : {
+            username: form.username,
+            password: form.password,
+            display_name: form.display_name,
+            email: form.email,
+            phone: form.phone,
+          };
       const data = await apiJson(path, {
         method: 'POST',
-        body: JSON.stringify(form),
+        body: JSON.stringify(body),
       });
       await setAuthToken(data.token);
       setUser(data.user);
       setView('feed');
       await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReset = async (e) => {
+    e.preventDefault();
+    if (form.password !== form.confirm) {
+      setError('Passwords do not match');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiJson('/api/social/password/reset', {
+        method: 'POST',
+        body: JSON.stringify({ contact: form.login_id, password: form.password }),
+      });
+      setForm((prev) => ({ ...prev, password: '', confirm: '' }));
+      setAuthMode('login');
+      setResetMessage('Password updated. Sign in with your email or phone.');
     } catch (err) {
       setError(err.message);
     } finally {
@@ -543,6 +589,8 @@ const Social = () => {
     setIdentity({
       display_name: user.display_name || '',
       username: user.username || '',
+      email: user.email || '',
+      phone: user.phone || '',
     });
     setEditingIdentity(true);
   };
@@ -732,15 +780,20 @@ const Social = () => {
           <p>Post your sunset and follow friends&apos; golden hours.</p>
         </header>
 
-        <form className="social-auth" onSubmit={handleAuth}>
-          <div className="auth-tabs">
-            <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>
-              Sign in
-            </button>
-            <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>
-              Create account
-            </button>
-          </div>
+        <form className="social-auth" onSubmit={authMode === 'forgot' ? handleReset : handleAuth}>
+          {authMode !== 'forgot' && (
+            <div className="auth-tabs">
+              <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setError(null); }}>
+                Sign in
+              </button>
+              <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => { setAuthMode('register'); setError(null); setResetMessage(null); }}>
+                Create account
+              </button>
+            </div>
+          )}
+          {authMode === 'forgot' && (
+            <p className="muted">Enter the email or phone on your account, then choose a new password.</p>
+          )}
           {authMode === 'register' && (
             <label>
               Display name
@@ -751,17 +804,54 @@ const Social = () => {
               />
             </label>
           )}
+          {authMode === 'register' ? (
+            <label>
+              Username
+              <input
+                required
+                value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+                autoComplete="username"
+              />
+            </label>
+          ) : (
+            <label>
+              Email or phone
+              <input
+                required
+                value={form.login_id}
+                onChange={(e) => setForm({ ...form, login_id: e.target.value })}
+                autoComplete="username"
+                placeholder="Email or phone"
+              />
+            </label>
+          )}
+          {authMode === 'register' && (
+            <>
+              <label>
+                Email
+                <input
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  autoComplete="email"
+                  placeholder="you@email.com"
+                />
+              </label>
+              <label>
+                Phone
+                <input
+                  type="tel"
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                  autoComplete="tel"
+                  placeholder="Phone number"
+                />
+              </label>
+            </>
+          )}
           <label>
-            Username
-            <input
-              required
-              value={form.username}
-              onChange={(e) => setForm({ ...form, username: e.target.value })}
-              autoComplete="username"
-            />
-          </label>
-          <label>
-            Password
+            {authMode === 'forgot' ? 'New password' : 'Password'}
             <input
               required
               type="password"
@@ -770,10 +860,33 @@ const Social = () => {
               autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
             />
           </label>
+          {authMode === 'forgot' && (
+            <label>
+              Confirm password
+              <input
+                required
+                type="password"
+                value={form.confirm}
+                onChange={(e) => setForm({ ...form, confirm: e.target.value })}
+                autoComplete="new-password"
+              />
+            </label>
+          )}
+          {resetMessage && authMode === 'login' && <p className="social-notice">{resetMessage}</p>}
           {error && <p className="social-error">{error}</p>}
           <button type="submit" disabled={busy}>
-            {busy ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Join SunCast'}
+            {busy ? 'Please wait…' : authMode === 'login' ? 'Sign in' : authMode === 'forgot' ? 'Reset password' : 'Join SunCast'}
           </button>
+          {authMode === 'login' && (
+            <button type="button" className="auth-switch" onClick={() => { setAuthMode('forgot'); setError(null); setResetMessage(null); }}>
+              Forgot password?
+            </button>
+          )}
+          {authMode === 'forgot' && (
+            <button type="button" className="auth-switch" onClick={() => { setAuthMode('login'); setError(null); }}>
+              Back to sign in
+            </button>
+          )}
         </form>
       </section>
     );
@@ -816,6 +929,7 @@ const Social = () => {
             <PostCard
               key={post.id}
               post={post}
+              showPlace={false}
               burstKey={bursts[post.id]}
               onLike={toggleLike}
               onRate={ratePost}
@@ -965,6 +1079,24 @@ const Social = () => {
                   onChange={(e) => setIdentity({ ...identity, username: e.target.value })}
                 />
               </label>
+              <label>
+                Email
+                <input
+                  type="email"
+                  value={identity.email}
+                  onChange={(e) => setIdentity({ ...identity, email: e.target.value })}
+                  autoComplete="email"
+                />
+              </label>
+              <label>
+                Phone
+                <input
+                  type="tel"
+                  value={identity.phone}
+                  onChange={(e) => setIdentity({ ...identity, phone: e.target.value })}
+                  autoComplete="tel"
+                />
+              </label>
               <div className="row-actions">
                 <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
                 <button type="button" className="ghost" onClick={() => setEditingIdentity(false)}>Cancel</button>
@@ -974,6 +1106,8 @@ const Social = () => {
             <div className="profile-bio">
               <h3>{user.display_name}</h3>
               <p className="username">@{user.username}</p>
+              {user.email && <p className="muted">{user.email}</p>}
+              {user.phone && <p className="muted">{user.phone}</p>}
               <button type="button" className="edit-profile" onClick={startIdentityEdit}>
                 Edit profile
               </button>
@@ -1009,6 +1143,7 @@ const Social = () => {
               key={post.id}
               id={`profile-post-${post.id}`}
               post={post}
+              showPlace={false}
               burstKey={bursts[post.id]}
               onLike={toggleLike}
               onRate={ratePost}

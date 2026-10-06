@@ -104,34 +104,60 @@ class SocialStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
             if "avatar_path" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_path TEXT")
+            if "email" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            if "phone" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email) WHERE email IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users(phone) WHERE phone IS NOT NULL"
+            )
 
-    def register(self, username: str, password: str, display_name: str = None) -> Dict:
+    def register(self, username: str, password: str, display_name: str = None, email: str = None, phone: str = None) -> Dict:
         username = (username or "").strip()
         if len(username) < 3:
             raise ValueError("Username must be at least 3 characters")
         if len(password or "") < 6:
             raise ValueError("Password must be at least 6 characters")
+        email = self._normalize_email(email)
+        phone = self._normalize_phone(phone)
+        if not email and not phone:
+            raise ValueError("Add an email or a phone number so you can reset your password")
         now = datetime.utcnow().isoformat()
         with self._conn() as conn:
             try:
                 cur = conn.execute(
-                    "INSERT INTO users (username, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
-                    (username, generate_password_hash(password), display_name or username, now),
+                    """
+                    INSERT INTO users (username, password_hash, display_name, created_at, email, phone)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (username, generate_password_hash(password), display_name or username, now, email, phone),
                 )
             except sqlite3.IntegrityError as e:
-                raise ValueError("Username already taken") from e
+                raise ValueError(self._taken_message(e)) from e
             user_id = cur.lastrowid
         return self.create_session(user_id)
 
     def login(self, username: str, password: str) -> Dict:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE username = ?",
-                ((username or "").strip(),),
-            ).fetchone()
+            row = self._find_account(conn, username, allow_username=True)
         if not row or not check_password_hash(row["password_hash"], password or ""):
-            raise ValueError("Invalid username or password")
+            raise ValueError("Wrong email, phone, or password")
         return self.create_session(row["id"])
+
+    def reset_password(self, contact: str, password: str) -> None:
+        if len(password or "") < 6:
+            raise ValueError("Password must be at least 6 characters")
+        with self._conn() as conn:
+            row = self._find_account(conn, contact, allow_username=False)
+            if not row:
+                raise ValueError("No account uses that email or phone")
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (generate_password_hash(password), row["id"]),
+            )
 
     def create_session(self, user_id: int) -> Dict:
         token = secrets.token_urlsafe(32)
@@ -144,7 +170,7 @@ class SocialStore:
             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return {
             "token": token,
-            "user": self._user_public(user),
+            "user": self._user_public(user, include_contact=True),
         }
 
     def user_from_token(self, token: str) -> Optional[Dict]:
@@ -159,12 +185,61 @@ class SocialStore:
                 """,
                 (token,),
             ).fetchone()
-        return self._user_public(row) if row else None
+        return self._user_public(row, include_contact=True) if row else None
 
-    def _user_public(self, row) -> Dict:
+    def _normalize_email(self, value: str) -> Optional[str]:
+        email = (value or "").strip().lower()
+        if not email:
+            return None
+        if " " in email or "@" not in email or email.startswith("@") or email.endswith("@"):
+            raise ValueError("Enter a valid email")
+        return email
+
+    def _normalize_phone(self, value: str) -> Optional[str]:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if len(digits) < 7:
+            raise ValueError("Enter a valid phone number")
+        return digits
+
+    def _taken_message(self, error: sqlite3.IntegrityError) -> str:
+        message = str(error).lower()
+        if "email" in message:
+            return "That email is already in use"
+        if "phone" in message:
+            return "That phone number is already in use"
+        return "Username already taken"
+
+    def _find_account(self, conn, contact: str, allow_username: bool):
+        text = (contact or "").strip()
+        if not text:
+            return None
+        if "@" in text:
+            return conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (text.lower(),),
+            ).fetchone()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 7:
+            row = conn.execute(
+                "SELECT * FROM users WHERE phone = ?",
+                (digits,),
+            ).fetchone()
+            if row or not allow_username:
+                return row
+        if not allow_username:
+            return None
+        return conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (text,),
+        ).fetchone()
+
+    def _user_public(self, row, include_contact: bool = False) -> Dict:
         avatar_path = row["avatar_path"] if "avatar_path" in row.keys() else None
         summary = self.received_rating(row["id"])
-        return {
+        data = {
             "id": row["id"],
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
@@ -173,6 +248,11 @@ class SocialStore:
             "average_rating": summary["average_rating"],
             "rating_count": summary["rating_count"],
         }
+        if include_contact:
+            keys = row.keys()
+            data["email"] = row["email"] if "email" in keys else None
+            data["phone"] = row["phone"] if "phone" in keys else None
+        return data
 
     def received_rating(self, user_id: int) -> Dict:
         """Mean of every rating left on this person's posts."""
@@ -193,7 +273,7 @@ class SocialStore:
             "rating_count": count,
         }
 
-    def update_profile(self, user_id: int, display_name: str = None, username: str = None) -> Dict:
+    def update_profile(self, user_id: int, display_name: str = None, username: str = None, email: str = None, phone: str = None, update_contact: bool = False) -> Dict:
         with self._conn() as conn:
             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if not user:
@@ -204,15 +284,20 @@ class SocialStore:
                 raise ValueError("Username must be at least 3 characters")
             if not new_name:
                 new_name = new_username
+            new_email = user["email"] if "email" in user.keys() else None
+            new_phone = user["phone"] if "phone" in user.keys() else None
+            if update_contact:
+                new_email = self._normalize_email(email)
+                new_phone = self._normalize_phone(phone)
             try:
                 conn.execute(
-                    "UPDATE users SET display_name = ?, username = ? WHERE id = ?",
-                    (new_name, new_username, user_id),
+                    "UPDATE users SET display_name = ?, username = ?, email = ?, phone = ? WHERE id = ?",
+                    (new_name, new_username, new_email, new_phone, user_id),
                 )
             except sqlite3.IntegrityError as e:
-                raise ValueError("Username already taken") from e
+                raise ValueError(self._taken_message(e)) from e
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        return self._user_public(row)
+        return self._user_public(row, include_contact=True)
 
     def set_avatar(self, user_id: int, image_path: str) -> Dict:
         with self._conn() as conn:
@@ -221,7 +306,7 @@ class SocialStore:
                 (image_path, user_id),
             )
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        return self._user_public(row)
+        return self._user_public(row, include_contact=True)
 
     def search_users(self, query: str, exclude_user_id: int = None) -> List[Dict]:
         term = (query or "").strip().lstrip("@")

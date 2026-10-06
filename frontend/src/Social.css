@@ -105,6 +105,17 @@
   box-shadow: 0 0 0 2px #f6efe8;
 }
 
+.auth-switch {
+  justify-self: center;
+  border: none;
+  background: none;
+  color: #9a3412;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.15rem;
+}
+
 .social-auth,
 .compose,
 .friends-panel,

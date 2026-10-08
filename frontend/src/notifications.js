@@ -21,9 +21,12 @@ export async function scheduleHighScoreNotifications(week) {
   await LocalNotifications.requestPermissions();
 
   const pending = await LocalNotifications.getPending();
-  if (pending?.notifications?.length) {
+  const sunsetIds = (pending?.notifications || [])
+    .map((item) => item.id)
+    .filter((id) => id >= 7000 && id < 7100);
+  if (sunsetIds.length) {
     await LocalNotifications.cancel({
-      notifications: pending.notifications.map((n) => ({ id: n.id })),
+      notifications: sunsetIds.map((id) => ({ id })),
     });
   }
 

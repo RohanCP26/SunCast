@@ -4,6 +4,7 @@
   "description": "SunCast — ML-powered weekly sunset aesthetic forecasts",
   "private": true,
   "dependencies": {
+    "@capacitor-community/contacts": "^8.0.0",
     "@capacitor/android": "^8.5.2",
     "@capacitor/cli": "^8.5.2",
     "@capacitor/core": "^8.5.2",

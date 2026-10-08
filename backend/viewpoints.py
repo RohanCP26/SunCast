@@ -47,6 +47,7 @@ class ViewpointFinder:
         limit: int = 8,
         location_name: str = "",
     ) -> List[Dict]:
+        radius_m = max(1000, min(int(radius_m), 50000))
         places = self._query_overpass(lat, lon, radius_m)
         if not places:
             # Soft fallback: suggest heading west to higher ground

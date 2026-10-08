@@ -516,6 +516,32 @@
   line-height: 1.4;
 }
 
+.viewpoint-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.55rem;
+}
+
+.viewpoint-actions a,
+.viewpoint-actions button,
+.text-link {
+  border: none;
+  background: none;
+  color: #9a3412;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.score-copy .text-link {
+  display: inline-block;
+  margin-top: 0.35rem;
+}
+
 .muted {
   color: var(--ink-faint);
   font-size: 0.9rem;

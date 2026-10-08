@@ -10,7 +10,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -114,6 +114,60 @@ class SocialStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users(phone) WHERE phone IS NOT NULL"
             )
+            if "public_id" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN public_id TEXT")
+            conn.execute(
+                """
+                UPDATE users
+                SET public_id = lower(hex(randomblob(16)))
+                WHERE public_id IS NULL OR public_id = ''
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_public_id_unique ON users(public_id)"
+            )
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users(username COLLATE NOCASE)"
+                )
+            except sqlite3.IntegrityError:
+                pass
+            token_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tokens)")}
+            if "expires_at" not in token_cols:
+                conn.execute("ALTER TABLE tokens ADD COLUMN expires_at TEXT")
+            later = (datetime.utcnow() + timedelta(days=30)).isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE tokens SET expires_at = ? WHERE expires_at IS NULL",
+                (later,),
+            )
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS reset_codes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    code_hash TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS blocks (
+                    blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (blocker_id, blocked_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    target_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+                    comment_id INTEGER REFERENCES comments(id) ON DELETE SET NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
 
     def register(self, username: str, password: str, display_name: str = None, email: str = None, phone: str = None) -> Dict:
         username = (username or "").strip()
@@ -130,10 +184,18 @@ class SocialStore:
             try:
                 cur = conn.execute(
                     """
-                    INSERT INTO users (username, password_hash, display_name, created_at, email, phone)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (username, password_hash, display_name, created_at, email, phone, public_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (username, generate_password_hash(password), display_name or username, now, email, phone),
+                    (
+                        username,
+                        generate_password_hash(password),
+                        display_name or username,
+                        now,
+                        email,
+                        phone,
+                        secrets.token_hex(16),
+                    ),
                 )
             except sqlite3.IntegrityError as e:
                 raise ValueError(self._taken_message(e)) from e
@@ -147,25 +209,78 @@ class SocialStore:
             raise ValueError("Wrong email, phone, or password")
         return self.create_session(row["id"])
 
-    def reset_password(self, contact: str, password: str) -> None:
-        if len(password or "") < 6:
-            raise ValueError("Password must be at least 6 characters")
+    def request_reset(self, contact: str) -> Optional[Dict]:
+        """Create a 15-minute code. None means no matching account. The code is not logged."""
         with self._conn() as conn:
             row = self._find_account(conn, contact, allow_username=False)
             if not row:
-                raise ValueError("No account uses that email or phone")
+                return None
+            code = f"{secrets.randbelow(1000000):06d}"
+            now = datetime.utcnow()
+            conn.execute("DELETE FROM reset_codes WHERE user_id = ?", (row["id"],))
+            conn.execute(
+                """
+                INSERT INTO reset_codes (user_id, code_hash, expires_at, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    generate_password_hash(code),
+                    (now + timedelta(minutes=15)).isoformat(timespec="seconds"),
+                    now.isoformat(timespec="seconds"),
+                ),
+            )
+            email = row["email"]
+            phone = row["phone"]
+        return {"email": email, "phone": phone, "code": code}
+
+    def confirm_reset(self, contact: str, code: str, password: str) -> None:
+        if len(password or "") < 6:
+            raise ValueError("Password must be at least 6 characters")
+        cleaned = "".join(ch for ch in str(code or "") if ch.isdigit())
+        with self._conn() as conn:
+            row = self._find_account(conn, contact, allow_username=False)
+            match = None
+            if row and len(cleaned) == 6:
+                codes = conn.execute(
+                    """
+                    SELECT * FROM reset_codes
+                    WHERE user_id = ?
+                    ORDER BY id DESC
+                    LIMIT 5
+                    """,
+                    (row["id"],),
+                ).fetchall()
+                now = datetime.utcnow()
+                for item in codes:
+                    try:
+                        expires = datetime.fromisoformat(item["expires_at"])
+                    except ValueError:
+                        continue
+                    if expires > now and check_password_hash(item["code_hash"], cleaned):
+                        match = item
+                        break
+            if not match:
+                raise ValueError("That code is wrong or expired")
             conn.execute(
                 "UPDATE users SET password_hash = ? WHERE id = ?",
                 (generate_password_hash(password), row["id"]),
             )
+            conn.execute("DELETE FROM reset_codes WHERE user_id = ?", (row["id"],))
+            conn.execute("DELETE FROM tokens WHERE user_id = ?", (row["id"],))
 
     def create_session(self, user_id: int) -> Dict:
         token = secrets.token_urlsafe(32)
-        now = datetime.utcnow().isoformat()
+        now = datetime.utcnow()
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
-                (token, user_id, now),
+                "INSERT INTO tokens (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (
+                    token,
+                    user_id,
+                    now.isoformat(timespec="seconds"),
+                    (now + timedelta(days=30)).isoformat(timespec="seconds"),
+                ),
             )
             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return {
@@ -179,13 +294,71 @@ class SocialStore:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT u.* FROM users u
+                SELECT u.*, t.expires_at AS token_expires
+                FROM users u
                 JOIN tokens t ON t.user_id = u.id
                 WHERE t.token = ?
                 """,
                 (token,),
             ).fetchone()
-        return self._user_public(row, include_contact=True) if row else None
+            if not row:
+                return None
+            try:
+                expires = datetime.fromisoformat(row["token_expires"] or "")
+            except ValueError:
+                expires = datetime.utcnow()
+            if expires <= datetime.utcnow():
+                conn.execute("DELETE FROM tokens WHERE token = ?", (token,))
+                return None
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+        return self._user_public(user, include_contact=True) if user else None
+
+    def logout(self, token: str) -> None:
+        if not token:
+            return
+        with self._conn() as conn:
+            conn.execute("DELETE FROM tokens WHERE token = ?", (token,))
+
+    def change_password(self, user_id: int, current: str, new_password: str, keep_token: str = None) -> None:
+        if len(new_password or "") < 6:
+            raise ValueError("Password must be at least 6 characters")
+        with self._conn() as conn:
+            row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row or not check_password_hash(row["password_hash"], current or ""):
+                raise ValueError("Current password is wrong")
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (generate_password_hash(new_password), user_id),
+            )
+            conn.execute(
+                "DELETE FROM tokens WHERE user_id = ? AND token != ?",
+                (user_id, keep_token or ""),
+            )
+
+    def delete_account(self, user_id: int) -> List[str]:
+        with self._conn() as conn:
+            user = conn.execute("SELECT avatar_path FROM users WHERE id = ?", (user_id,)).fetchone()
+            posts = conn.execute(
+                "SELECT image_path FROM posts WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+            paths = []
+            if user and user["avatar_path"]:
+                paths.append(user["avatar_path"])
+            paths.extend(row["image_path"] for row in posts if row["image_path"])
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return paths
+
+    def delete_post(self, user_id: int, post_id: int) -> str:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT image_path FROM posts WHERE id = ? AND user_id = ?",
+                (post_id, user_id),
+            ).fetchone()
+            if not row:
+                raise ValueError("Post not found")
+            conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        return row["image_path"]
 
     def _normalize_email(self, value: str) -> Optional[str]:
         email = (value or "").strip().lower()
@@ -206,11 +379,7 @@ class SocialStore:
 
     def _taken_message(self, error: sqlite3.IntegrityError) -> str:
         message = str(error).lower()
-        if "email" in message:
-            return "That email is already in use"
-        if "phone" in message:
-            return "That phone number is already in use"
-        return "Username already taken"
+        return "That email, phone, or username is already in use"
 
     def _find_account(self, conn, contact: str, allow_username: bool):
         text = (contact or "").strip()
@@ -232,7 +401,7 @@ class SocialStore:
         if not allow_username:
             return None
         return conn.execute(
-            "SELECT * FROM users WHERE username = ?",
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
             (text,),
         ).fetchone()
 
@@ -241,6 +410,7 @@ class SocialStore:
         summary = self.received_rating(row["id"])
         data = {
             "id": row["id"],
+            "public_id": row["public_id"] if "public_id" in row.keys() else None,
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
             "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,
@@ -289,6 +459,8 @@ class SocialStore:
             if update_contact:
                 new_email = self._normalize_email(email)
                 new_phone = self._normalize_phone(phone)
+                if not new_email and not new_phone:
+                    raise ValueError("Keep an email or a phone number on the account")
             try:
                 conn.execute(
                     "UPDATE users SET display_name = ?, username = ?, email = ?, phone = ? WHERE id = ?",
@@ -308,6 +480,15 @@ class SocialStore:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return self._user_public(row, include_contact=True)
 
+    def clear_avatar(self, user_id: int):
+        """Drop the profile photo and return (user, previous file path)."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            old_path = row["avatar_path"] if row and "avatar_path" in row.keys() else None
+            conn.execute("UPDATE users SET avatar_path = NULL WHERE id = ?", (user_id,))
+            updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._user_public(updated, include_contact=True), old_path
+
     def search_users(self, query: str, exclude_user_id: int = None) -> List[Dict]:
         term = (query or "").strip().lstrip("@")
         q = f"%{term}%"
@@ -320,44 +501,163 @@ class SocialStore:
                 """,
                 (q, q),
             ).fetchall()
-            relations = {}
-            if exclude_user_id:
-                rel_rows = conn.execute(
-                    """
-                    SELECT * FROM friendships
-                    WHERE requester_id = ? OR addressee_id = ?
-                    """,
-                    (exclude_user_id, exclude_user_id),
-                ).fetchall()
-                for rel in rel_rows:
-                    other_id = rel["addressee_id"] if rel["requester_id"] == exclude_user_id else rel["requester_id"]
-                    if rel["status"] == "accepted":
-                        kind = "friends"
-                    elif rel["requester_id"] == exclude_user_id:
-                        kind = "outgoing"
-                    else:
-                        kind = "incoming"
-                    relations[other_id] = {"relation": kind, "friendship_id": rel["id"]}
+            relations = self._friend_relations(conn, exclude_user_id) if exclude_user_id else {}
+            hidden = self._hidden_user_ids(conn, exclude_user_id) if exclude_user_id else set()
         users = []
         for row in rows:
             if exclude_user_id and row["id"] == exclude_user_id:
+                continue
+            if row["id"] in hidden:
                 continue
             user = self._user_public(row)
             user.update(relations.get(row["id"], {"relation": "none", "friendship_id": None}))
             users.append(user)
         return users
 
+    def _friend_relations(self, conn, user_id: int) -> Dict:
+        relations = {}
+        rel_rows = conn.execute(
+            """
+            SELECT * FROM friendships
+            WHERE requester_id = ? OR addressee_id = ?
+            """,
+            (user_id, user_id),
+        ).fetchall()
+        for rel in rel_rows:
+            other_id = rel["addressee_id"] if rel["requester_id"] == user_id else rel["requester_id"]
+            if rel["status"] == "accepted":
+                kind = "friends"
+            elif rel["requester_id"] == user_id:
+                kind = "outgoing"
+            else:
+                kind = "incoming"
+            relations[other_id] = {"relation": kind, "friendship_id": rel["id"]}
+        return relations
+
+    def _hidden_user_ids(self, conn, user_id: int) -> set:
+        rows = conn.execute(
+            """
+            SELECT blocked_id AS other_id FROM blocks WHERE blocker_id = ?
+            UNION
+            SELECT blocker_id AS other_id FROM blocks WHERE blocked_id = ?
+            """,
+            (user_id, user_id),
+        ).fetchall()
+        return {row["other_id"] for row in rows}
+
+    def _are_friends(self, conn, left_id: int, right_id: int) -> bool:
+        row = conn.execute(
+            """
+            SELECT 1 FROM friendships
+            WHERE status = 'accepted'
+              AND (
+                (requester_id = ? AND addressee_id = ?)
+                OR (requester_id = ? AND addressee_id = ?)
+              )
+            """,
+            (left_id, right_id, right_id, left_id),
+        ).fetchone()
+        return row is not None
+
+    def _can_view_posts(self, conn, viewer_id: int, owner_id: int) -> bool:
+        if not viewer_id or not owner_id:
+            return False
+        if owner_id in self._hidden_user_ids(conn, viewer_id):
+            return False
+        if viewer_id == owner_id:
+            return True
+        return self._are_friends(conn, viewer_id, owner_id)
+
+    def _require_visible_post(self, conn, viewer_id: int, post_id: int):
+        row = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row or not self._can_view_posts(conn, viewer_id, row["user_id"]):
+            raise ValueError("Post not found")
+        return row
+
+    def _phone_lookup_keys(self, value: str) -> List[str]:
+        digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+        if len(digits) < 7:
+            return []
+        keys = [digits]
+        if len(digits) == 11 and digits.startswith("1"):
+            keys.append(digits[1:])
+        elif len(digits) == 10:
+            keys.append("1" + digits)
+        return keys
+
+    def suggest_from_contacts(self, user_id: int, emails, phones) -> List[Dict]:
+        """Match account email or phone against a contact list. The list is not stored."""
+        email_keys = []
+        seen_emails = set()
+        for raw in (emails or [])[:1000]:
+            try:
+                email = self._normalize_email(str(raw))
+            except ValueError:
+                continue
+            if email and email not in seen_emails:
+                seen_emails.add(email)
+                email_keys.append(email)
+
+        phone_keys = []
+        seen_phones = set()
+        for raw in (phones or [])[:1000]:
+            for key in self._phone_lookup_keys(raw):
+                if key not in seen_phones:
+                    seen_phones.add(key)
+                    phone_keys.append(key)
+
+        if not email_keys and not phone_keys:
+            return []
+
+        matched = {}
+        with self._conn() as conn:
+            for chunk in self._chunks(email_keys, 400):
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM users WHERE email IN ({marks})",
+                    tuple(chunk),
+                ).fetchall()
+                for row in rows:
+                    matched[row["id"]] = row
+            for chunk in self._chunks(phone_keys, 400):
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM users WHERE phone IN ({marks})",
+                    tuple(chunk),
+                ).fetchall()
+                for row in rows:
+                    matched[row["id"]] = row
+            relations = self._friend_relations(conn, user_id)
+            hidden = self._hidden_user_ids(conn, user_id)
+
+        people = []
+        for row in matched.values():
+            if row["id"] == user_id or row["id"] in hidden:
+                continue
+            person = self._user_public(row)
+            person.update(relations.get(row["id"], {"relation": "none", "friendship_id": None}))
+            people.append(person)
+        people.sort(key=lambda person: (person.get("display_name") or "").lower())
+        return people
+
+    @staticmethod
+    def _chunks(values: List, size: int):
+        for start in range(0, len(values), size):
+            yield values[start:start + size]
+
     def request_friend(self, requester_id: int, username: str) -> Dict:
         username = (username or "").strip().lstrip("@")
         with self._conn() as conn:
             other = conn.execute(
-                "SELECT * FROM users WHERE username = ?",
+                "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
                 (username,),
             ).fetchone()
             if not other:
                 raise ValueError("User not found")
             if other["id"] == requester_id:
                 raise ValueError("Cannot friend yourself")
+            if other["id"] in self._hidden_user_ids(conn, requester_id):
+                raise ValueError("You can't add this person")
             existing = conn.execute(
                 """
                 SELECT * FROM friendships
@@ -408,11 +708,214 @@ class SocialStore:
                 status = "declined"
         return {"id": friendship_id, "status": status}
 
+    def cancel_request(self, user_id: int, friendship_id: int) -> None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM friendships WHERE id = ?",
+                (friendship_id,),
+            ).fetchone()
+            if not row or row["requester_id"] != user_id or row["status"] != "pending":
+                raise ValueError("Friend request not found")
+            conn.execute("DELETE FROM friendships WHERE id = ?", (friendship_id,))
+
+    def unfriend(self, user_id: int, friendship_id: int) -> None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM friendships WHERE id = ?",
+                (friendship_id,),
+            ).fetchone()
+            if not row or row["status"] != "accepted":
+                raise ValueError("Friend not found")
+            if user_id not in (row["requester_id"], row["addressee_id"]):
+                raise ValueError("Friend not found")
+            conn.execute("DELETE FROM friendships WHERE id = ?", (friendship_id,))
+
+    def block_user(self, user_id: int, public_id: str) -> None:
+        with self._conn() as conn:
+            other = conn.execute(
+                "SELECT id FROM users WHERE public_id = ?",
+                ((public_id or "").strip(),),
+            ).fetchone()
+            if not other or other["id"] == user_id:
+                raise ValueError("User not found")
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO blocks (blocker_id, blocked_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(blocker_id, blocked_id) DO NOTHING
+                """,
+                (user_id, other["id"], now),
+            )
+            conn.execute(
+                """
+                DELETE FROM friendships
+                WHERE (requester_id = ? AND addressee_id = ?)
+                   OR (requester_id = ? AND addressee_id = ?)
+                """,
+                (user_id, other["id"], other["id"], user_id),
+            )
+
+    def unblock_user(self, user_id: int, public_id: str) -> None:
+        with self._conn() as conn:
+            other = conn.execute(
+                "SELECT id FROM users WHERE public_id = ?",
+                ((public_id or "").strip(),),
+            ).fetchone()
+            if not other:
+                raise ValueError("User not found")
+            conn.execute(
+                "DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?",
+                (user_id, other["id"]),
+            )
+
+    def create_report(
+        self,
+        reporter_id: int,
+        reason: str,
+        target_public_id: str = None,
+        post_id: int = None,
+        comment_id: int = None,
+    ) -> Dict:
+        reason = " ".join((reason or "").split())
+        if not reason:
+            raise ValueError("Add a reason")
+        if len(reason) > 500:
+            raise ValueError("Reason is too long")
+        with self._conn() as conn:
+            target_id = None
+            if target_public_id:
+                target = conn.execute(
+                    "SELECT id FROM users WHERE public_id = ?",
+                    (str(target_public_id).strip(),),
+                ).fetchone()
+                if not target or target["id"] == reporter_id:
+                    raise ValueError("User not found")
+                target_id = target["id"]
+            if post_id:
+                post = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (int(post_id),)).fetchone()
+                if not post:
+                    raise ValueError("Post not found")
+                target_id = target_id or post["user_id"]
+            if comment_id:
+                comment = conn.execute(
+                    "SELECT id, user_id, post_id FROM comments WHERE id = ?",
+                    (int(comment_id),),
+                ).fetchone()
+                if not comment:
+                    raise ValueError("Comment not found")
+                target_id = target_id or comment["user_id"]
+                post_id = post_id or comment["post_id"]
+            if not target_id and not post_id and not comment_id:
+                raise ValueError("Choose a person or a post to report")
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            cur = conn.execute(
+                """
+                INSERT INTO reports
+                (reporter_id, target_user_id, post_id, comment_id, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (reporter_id, target_id, post_id, comment_id, reason, now),
+            )
+            report_id = cur.lastrowid
+        return {"id": report_id, "reason": reason}
+
+    def list_reports(self, limit: int = 100) -> List[Dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.*,
+                       reporter.username AS reporter_username,
+                       target.username AS target_username
+                FROM reports r
+                JOIN users reporter ON reporter.id = r.reporter_id
+                LEFT JOIN users target ON target.id = r.target_user_id
+                ORDER BY r.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "reporter": row["reporter_username"],
+                "target": row["target_username"],
+                "post_id": row["post_id"],
+                "comment_id": row["comment_id"],
+                "reason": row["reason"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def activity(self, user_id: int) -> Dict:
+        with self._conn() as conn:
+            hidden = self._hidden_user_ids(conn, user_id)
+            incoming = conn.execute(
+                """
+                SELECT f.id AS friendship_id, f.created_at, f.requester_id,
+                       u.username, u.display_name, u.public_id
+                FROM friendships f
+                JOIN users u ON u.id = f.requester_id
+                WHERE f.addressee_id = ? AND f.status = 'pending'
+                ORDER BY f.created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+            comments = conn.execute(
+                """
+                SELECT c.id, c.post_id, c.body, c.created_at, c.user_id,
+                       u.username, u.display_name
+                FROM comments c
+                JOIN posts p ON p.id = c.post_id
+                JOIN users u ON u.id = c.user_id
+                WHERE p.user_id = ? AND c.user_id != ?
+                ORDER BY c.created_at DESC
+                LIMIT 30
+                """,
+                (user_id, user_id),
+            ).fetchall()
+        return {
+            "incoming": [
+                {
+                    "friendship_id": row["friendship_id"],
+                    "public_id": row["public_id"],
+                    "username": row["username"],
+                    "display_name": row["display_name"] or row["username"],
+                    "created_at": row["created_at"],
+                }
+                for row in incoming
+                if row["requester_id"] not in hidden
+            ],
+            "comments": [
+                {
+                    "id": row["id"],
+                    "post_id": row["post_id"],
+                    "body": row["body"],
+                    "username": row["username"],
+                    "display_name": row["display_name"] or row["username"],
+                    "created_at": row["created_at"],
+                }
+                for row in comments
+                if row["user_id"] not in hidden
+            ],
+        }
+
+    def user_id_from_public(self, public_id: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE public_id = ?",
+                ((public_id or "").strip(),),
+            ).fetchone()
+        if not row:
+            raise ValueError("User not found")
+        return row["id"]
+
     def list_friends(self, user_id: int) -> Dict:
         with self._conn() as conn:
             accepted = conn.execute(
                 """
-                SELECT u.* FROM users u
+                SELECT f.id AS friendship_id, u.* FROM users u
                 JOIN friendships f ON (
                     (f.requester_id = ? AND f.addressee_id = u.id)
                     OR (f.addressee_id = ? AND f.requester_id = u.id)
@@ -440,16 +943,29 @@ class SocialStore:
                 """,
                 (user_id,),
             ).fetchall()
+            blocked = conn.execute(
+                """
+                SELECT u.* FROM users u
+                JOIN blocks b ON b.blocked_id = u.id
+                WHERE b.blocker_id = ?
+                ORDER BY u.username
+                """,
+                (user_id,),
+            ).fetchall()
         return {
-            "friends": [self._user_public(r) for r in accepted],
+            "friends": [
+                {**self._user_public(r), "friendship_id": r["friendship_id"], "relation": "friends"}
+                for r in accepted
+            ],
             "incoming": [
-                {**self._user_public(r), "friendship_id": r["friendship_id"]}
+                {**self._user_public(r), "friendship_id": r["friendship_id"], "relation": "incoming"}
                 for r in incoming
             ],
             "outgoing": [
-                {**self._user_public(r), "friendship_id": r["friendship_id"]}
+                {**self._user_public(r), "friendship_id": r["friendship_id"], "relation": "outgoing"}
                 for r in outgoing
             ],
+            "blocked": [self._user_public(r) for r in blocked],
         }
 
     def create_post(
@@ -487,6 +1003,8 @@ class SocialStore:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if not row:
                 raise ValueError("User not found")
+            if viewer_id and user_id in self._hidden_user_ids(conn, viewer_id):
+                raise ValueError("User not found")
             friend_count = conn.execute(
                 """
                 SELECT COUNT(*) AS n FROM friendships
@@ -495,25 +1013,30 @@ class SocialStore:
                 """,
                 (user_id, user_id),
             ).fetchone()["n"]
+            visible = self._can_view_posts(conn, viewer_id or user_id, user_id)
         user = self._user_public(row)
         user["friend_count"] = int(friend_count or 0)
         return {
             "user": user,
-            "posts": self.posts_for_user(user_id, viewer_id=viewer_id),
+            "posts": self.posts_for_user(user_id, viewer_id=viewer_id) if visible else [],
+            "posts_visible": visible,
         }
 
     def posts_for_user(self, user_id: int, viewer_id: int = None) -> List[Dict]:
+        viewer = viewer_id if viewer_id is not None else user_id
         with self._conn() as conn:
+            if not self._can_view_posts(conn, viewer, user_id):
+                return []
             rows = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name, u.avatar_path
+                SELECT p.*, u.username, u.display_name, u.avatar_path, u.public_id
                 FROM posts p JOIN users u ON u.id = p.user_id
                 WHERE p.user_id = ?
                 ORDER BY p.created_at DESC
                 """,
                 (user_id,),
             ).fetchall()
-        return [self._post_public(r, viewer_id if viewer_id is not None else user_id) for r in rows]
+        return [self._post_public(r, viewer) for r in rows]
 
     def update_post(
         self,
@@ -544,7 +1067,7 @@ class SocialStore:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name, u.avatar_path
+                SELECT p.*, u.username, u.display_name, u.avatar_path, u.public_id
                 FROM posts p JOIN users u ON u.id = p.user_id
                 WHERE p.id = ?
                 """,
@@ -555,8 +1078,7 @@ class SocialStore:
     def toggle_like(self, user_id: int, post_id: int) -> Dict:
         now = datetime.utcnow().isoformat()
         with self._conn() as conn:
-            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
-                raise ValueError("Post not found")
+            self._require_visible_post(conn, user_id, post_id)
             existing = conn.execute(
                 "SELECT 1 FROM likes WHERE user_id = ? AND post_id = ?",
                 (user_id, post_id),
@@ -585,8 +1107,7 @@ class SocialStore:
             raise ValueError("Rate from 1 to 10")
         now = datetime.utcnow().isoformat()
         with self._conn() as conn:
-            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
-                raise ValueError("Post not found")
+            self._require_visible_post(conn, user_id, post_id)
             conn.execute(
                 """
                 INSERT INTO ratings (user_id, post_id, score, created_at)
@@ -610,8 +1131,7 @@ class SocialStore:
             raise ValueError("Comment is too long")
         now = datetime.utcnow().isoformat()
         with self._conn() as conn:
-            if not conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone():
-                raise ValueError("Post not found")
+            self._require_visible_post(conn, user_id, post_id)
             conn.execute(
                 """
                 INSERT INTO comments (user_id, post_id, body, created_at)
@@ -624,12 +1144,33 @@ class SocialStore:
             raise ValueError("Post not found")
         return post
 
+    def delete_comment(self, user_id: int, post_id: int, comment_id: int) -> Dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT c.user_id AS author_id, p.user_id AS post_user_id
+                FROM comments c
+                JOIN posts p ON p.id = c.post_id
+                WHERE c.id = ? AND c.post_id = ?
+                """,
+                (comment_id, post_id),
+            ).fetchone()
+            if not row:
+                raise ValueError("Comment not found")
+            if row["author_id"] != user_id and row["post_user_id"] != user_id:
+                raise ValueError("You can only delete your own comments, or comments on your post")
+            conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+        post = self.get_post(post_id, viewer_id=user_id)
+        if not post:
+            raise ValueError("Post not found")
+        return post
+
     def feed_for_user(self, user_id: int, limit: int = 50) -> List[Dict]:
         """Posts from accepted friends, newest first. Your own posts stay on your profile."""
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT p.*, u.username, u.display_name, u.avatar_path
+                SELECT p.*, u.username, u.display_name, u.avatar_path, u.public_id
                 FROM posts p
                 JOIN users u ON u.id = p.user_id
                 WHERE p.user_id IN (
@@ -641,10 +1182,15 @@ class SocialStore:
                     WHERE status = 'accepted'
                       AND (requester_id = ? OR addressee_id = ?)
                 )
+                AND p.user_id NOT IN (
+                    SELECT blocked_id FROM blocks WHERE blocker_id = ?
+                    UNION
+                    SELECT blocker_id FROM blocks WHERE blocked_id = ?
+                )
                 ORDER BY p.created_at DESC
                 LIMIT ?
                 """,
-                (user_id, user_id, user_id, limit),
+                (user_id, user_id, user_id, user_id, user_id, limit),
             ).fetchall()
         return [self._post_public(r, user_id) for r in rows]
 
@@ -678,7 +1224,7 @@ class SocialStore:
                 """
                 SELECT * FROM (
                     SELECT c.id, c.user_id, c.body, c.created_at,
-                           u.username, u.display_name, u.avatar_path
+                           u.username, u.display_name, u.avatar_path, u.public_id
                     FROM comments c
                     JOIN users u ON u.id = c.user_id
                     WHERE c.post_id = ?
@@ -693,9 +1239,12 @@ class SocialStore:
                 "SELECT COUNT(*) AS n FROM comments WHERE post_id = ?",
                 (post_id,),
             ).fetchone()["n"]
+            hidden = self._hidden_user_ids(conn, viewer_id) if viewer_id else set()
+        visible_comments = [c for c in comments if c["user_id"] not in hidden]
         return {
             "id": post_id,
             "user_id": row["user_id"],
+            "public_id": row["public_id"] if "public_id" in keys else None,
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
             "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,
@@ -710,8 +1259,8 @@ class SocialStore:
             "rating_average": round(float(rating["average_rating"]), 1) if rating_count else None,
             "rating_count": rating_count,
             "my_rating": my_rating,
-            "comment_count": int(comment_count or 0),
-            "comments": [self._comment_public(c) for c in comments],
+            "comment_count": len(visible_comments) if hidden else int(comment_count or 0),
+            "comments": [self._comment_public(c) for c in visible_comments],
         }
 
     def _comment_public(self, row) -> Dict:
@@ -719,6 +1268,7 @@ class SocialStore:
         return {
             "id": row["id"],
             "user_id": row["user_id"],
+            "public_id": row["public_id"] if "public_id" in row.keys() else None,
             "username": row["username"],
             "display_name": row["display_name"] or row["username"],
             "avatar_url": f"/uploads/{os.path.basename(avatar_path)}" if avatar_path else None,

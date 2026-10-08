@@ -58,6 +58,8 @@ class SunsetImageGenerator:
         location_name: Optional[str] = None,
     ) -> Dict:
         prompt = self._enrich_prompt(prompt or "", location_name=location_name)
+        width = int(np.clip(int(width or 1024), 64, 1280))
+        height = int(np.clip(int(height or 768), 64, 960))
         errors = []
 
         # Prefer real AI when configured

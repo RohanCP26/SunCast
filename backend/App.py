@@ -22,17 +22,23 @@ To test:
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from datetime import datetime, timedelta
+import io
 import os
-from dotenv import load_dotenv
+import secrets
+import time
 import traceback
+import uuid
+from dotenv import load_dotenv
 import numpy as np
-from werkzeug.utils import secure_filename
+from PIL import Image
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from model.sunset_data_pipeline import SunsetDataPipeline
 from model.sunset_ml_models import SunsetGradientBoostingModel, SunsetPredictionPipeline
 from model.image_generator import SunsetImageGenerator
 from social_store import SocialStore
 from viewpoints import ViewpointFinder
+from delivery import deliver_report, deliver_reset_code
 
 # ============================================================================
 # SETUP
@@ -42,25 +48,66 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests (for frontend on different port)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 # Global objects (load once at startup)
 DATA_PIPELINE = None
 ML_MODEL = None
 PREDICTION_PIPELINE = None
 IMAGE_GENERATOR = None
-SOCIAL = SocialStore()
+_STORAGE = os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or os.getenv("SUNCAST_DATA_DIR")
+if _STORAGE:
+    os.makedirs(_STORAGE, exist_ok=True)
+    SOCIAL = SocialStore(os.path.join(_STORAGE, "suncast_social.db"))
+    UPLOAD_DIR = os.path.join(_STORAGE, "uploads")
+else:
+    SOCIAL = SocialStore()
+    UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 VIEWPOINTS = ViewpointFinder()
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif"}
+_IMAGE_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "gif"}
+_HITS = {}
 
 
-def _auth_user():
+def _request_token():
     auth = request.headers.get("Authorization", "")
     token = auth.replace("Bearer", "").strip() if auth else ""
     if not token:
         token = request.headers.get("X-Auth-Token", "")
-    return SOCIAL.user_from_token(token)
+    return token
+
+
+def _auth_user():
+    return SOCIAL.user_from_token(_request_token())
+
+
+def _client_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "local"
+
+
+def _rate_limit(bucket: str, limit: int, window: int) -> bool:
+    now = time.time()
+    hits = [stamp for stamp in _HITS.get(bucket, []) if now - stamp < window]
+    if len(hits) >= limit:
+        _HITS[bucket] = hits
+        return False
+    hits.append(now)
+    _HITS[bucket] = hits
+    return True
+
+
+def _too_many():
+    return jsonify({"success": False, "error": "Too many attempts. Try again later."}), 429
+
+
+def _dev_reset_enabled():
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        return False
+    return os.getenv("SUNCAST_DEV_RESET") == "1"
 
 
 def _require_user():
@@ -73,14 +120,23 @@ def _require_user():
 def _save_image(file, prefix: str) -> str:
     if not file or not file.filename:
         raise ValueError("Photo required")
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
+    raw = file.read()
+    if not raw:
+        raise ValueError("Photo required")
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("Photo must be under 8 MB")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            ext = _IMAGE_FORMATS.get((image.format or "").upper())
+            image.verify()
+    except Exception as exc:
+        raise ValueError("Invalid image type") from exc
+    if not ext:
         raise ValueError("Invalid image type")
-    filename = secure_filename(
-        f"{prefix}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    )
+    filename = f"{uuid.uuid4().hex}.{ext}"
     path = os.path.join(UPLOAD_DIR, filename)
-    file.save(path)
+    with open(path, "wb") as handle:
+        handle.write(raw)
     return path
 
 def initialize_models():
@@ -251,6 +307,7 @@ def health():
         'status': 'healthy',
         'model_loaded': ML_MODEL.trained if ML_MODEL else False,
         'pipeline_ready': PREDICTION_PIPELINE is not None,
+        'persistent_storage': bool(os.getenv("RAILWAY_VOLUME_MOUNT_PATH")),
         'timestamp': datetime.now().isoformat()
     })
 
@@ -464,8 +521,7 @@ def predict():
         traceback.print_exc()
         return jsonify({
             'success': False,
-            'error': str(e),
-            'type': type(e).__name__
+            'error': 'Something went wrong',
         }), 500
 
 
@@ -491,6 +547,8 @@ def generate_image():
       }
     """
     try:
+        if not _rate_limit(f"image:{_client_ip()}", 20, 3600):
+            return _too_many()
         if IMAGE_GENERATOR is None:
             return jsonify({'success': False, 'error': 'Image generator not initialized'}), 503
 
@@ -552,7 +610,10 @@ def generate_image():
             location_name=location_name or None,
         )
         result['location_name'] = location_name or None
-        result['prompt'] = prompt
+        result.pop("fallback_errors", None)
+        result.pop("prior_errors", None)
+        if not result.get("success"):
+            result["error"] = "Could not create an image"
 
         status = 200 if result.get('success') else 502
         return jsonify(result), status
@@ -562,8 +623,7 @@ def generate_image():
         traceback.print_exc()
         return jsonify({
             'success': False,
-            'error': str(e),
-            'type': type(e).__name__,
+            'error': 'Something went wrong',
         }), 500
 
 
@@ -616,7 +676,7 @@ def geocode():
             }), 404
         return jsonify({'success': True, 'results': places, 'best': places[0]})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Something went wrong'}), 500
 
 
 @app.route('/api/reverse-geocode', methods=['GET', 'POST'])
@@ -639,7 +699,7 @@ def reverse_geocode():
             })
         return jsonify({'success': True, 'label': place['label'], 'best': place})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Something went wrong'}), 500
 
 
 @app.route('/api/week', methods=['POST', 'GET'])
@@ -815,8 +875,7 @@ def week_forecast():
         traceback.print_exc()
         return jsonify({
             'success': False,
-            'error': str(e),
-            'type': type(e).__name__,
+            'error': 'Something went wrong',
         }), 500
 
 
@@ -824,11 +883,17 @@ def week_forecast():
 def viewpoints():
     """Find high / scenic sunset spots near a location."""
     try:
+        if not _rate_limit(f"viewpoints:{_client_ip()}", 30, 3600):
+            return _too_many()
         data = request.get_json(silent=True) or {}
         latitude = float(data.get('latitude', request.args.get('latitude', 30.2672)))
         longitude = float(data.get('longitude', request.args.get('longitude', -97.7431)))
         location_name = data.get('location_name', request.args.get('location_name', ''))
-        radius_m = int(data.get('radius_m', request.args.get('radius_m', 25000)))
+        try:
+            radius_m = int(data.get('radius_m', request.args.get('radius_m', 25000)))
+        except (TypeError, ValueError):
+            radius_m = 25000
+        radius_m = max(1000, min(radius_m, 50000))
         is_valid, message = validate_coordinates(latitude, longitude)
         if not is_valid:
             return jsonify({'error': message}), 400
@@ -847,7 +912,7 @@ def viewpoints():
         })
     except Exception as e:
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Something went wrong'}), 500
 
 
 @app.route('/uploads/<path:filename>')
@@ -857,6 +922,8 @@ def uploaded_file(filename):
 
 @app.route('/api/social/register', methods=['POST'])
 def social_register():
+    if not _rate_limit(f"register:{_client_ip()}", 8, 3600):
+        return _too_many()
     data = request.get_json(silent=True) or {}
     try:
         session = SOCIAL.register(
@@ -873,6 +940,8 @@ def social_register():
 
 @app.route('/api/social/login', methods=['POST'])
 def social_login():
+    if not _rate_limit(f"login:{_client_ip()}", 10, 900):
+        return _too_many()
     data = request.get_json(silent=True) or {}
     try:
         session = SOCIAL.login(data.get('username') or data.get('contact'), data.get('password'))
@@ -881,14 +950,43 @@ def social_login():
         return jsonify({'success': False, 'error': str(e)}), 401
 
 
+@app.route('/api/social/password/forgot', methods=['POST'])
+def social_forgot_password():
+    if not _rate_limit(f"forgot:{_client_ip()}", 5, 3600):
+        return _too_many()
+    data = request.get_json(silent=True) or {}
+    message = "If an account uses that email or phone, we sent a code."
+    try:
+        delivery = SOCIAL.request_reset(data.get("contact"))
+    except ValueError:
+        delivery = None
+    if delivery:
+        try:
+            deliver_reset_code(delivery.get("email"), delivery.get("phone"), delivery["code"])
+        except Exception:
+            traceback.print_exc()
+    payload = {"success": True, "message": message}
+    if delivery and _dev_reset_enabled():
+        payload["dev_code"] = delivery["code"]
+    return jsonify(payload)
+
+
 @app.route('/api/social/password/reset', methods=['POST'])
 def social_reset_password():
+    if not _rate_limit(f"reset:{_client_ip()}", 10, 3600):
+        return _too_many()
     data = request.get_json(silent=True) or {}
     try:
-        SOCIAL.reset_password(data.get('contact'), data.get('password'))
-        return jsonify({'success': True})
+        SOCIAL.confirm_reset(data.get("contact"), data.get("code"), data.get("password"))
+        return jsonify({"success": True})
     except ValueError as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/social/logout', methods=['POST'])
+def social_logout():
+    SOCIAL.logout(_request_token())
+    return jsonify({"success": True})
 
 
 @app.route('/api/social/me', methods=['GET'])
@@ -919,6 +1017,46 @@ def social_update_me():
         return jsonify({'success': False, 'error': str(e)}), 400
 
 
+@app.route('/api/social/me/password', methods=['POST'])
+def social_change_password():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.change_password(
+            user["id"],
+            data.get("current_password"),
+            data.get("password"),
+            keep_token=_request_token(),
+        )
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/social/me', methods=['DELETE'])
+def social_delete_me():
+    user, err = _require_user()
+    if err:
+        return err
+    for path in SOCIAL.delete_account(user["id"]):
+        _delete_upload(path)
+    return jsonify({"success": True})
+
+
+def _delete_upload(path: str) -> None:
+    if not path:
+        return
+    real = os.path.realpath(path)
+    root = os.path.realpath(UPLOAD_DIR)
+    if real != root and real.startswith(root + os.sep) and os.path.isfile(real):
+        try:
+            os.remove(real)
+        except OSError:
+            pass
+
+
 @app.route('/api/social/me/avatar', methods=['POST'])
 def social_update_avatar():
     user, err = _require_user()
@@ -932,6 +1070,16 @@ def social_update_avatar():
     return jsonify({'success': True, 'user': updated})
 
 
+@app.route('/api/social/me/avatar', methods=['DELETE'])
+def social_clear_avatar():
+    user, err = _require_user()
+    if err:
+        return err
+    updated, old_path = SOCIAL.clear_avatar(user['id'])
+    _delete_upload(old_path)
+    return jsonify({'success': True, 'user': updated})
+
+
 @app.route('/api/social/me/posts', methods=['GET'])
 def social_my_posts():
     user, err = _require_user()
@@ -940,13 +1088,16 @@ def social_my_posts():
     return jsonify({'success': True, 'posts': SOCIAL.posts_for_user(user['id'])})
 
 
-@app.route('/api/social/users/<int:user_id>', methods=['GET'])
-def social_user_profile(user_id):
+@app.route('/api/social/users/<public_id>', methods=['GET'])
+def social_user_profile(public_id):
     user, err = _require_user()
     if err:
         return err
     try:
-        profile = SOCIAL.public_profile(user_id, viewer_id=user['id'])
+        profile = SOCIAL.public_profile(
+            SOCIAL.user_id_from_public(public_id),
+            viewer_id=user['id'],
+        )
         return jsonify({'success': True, **profile})
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 404
@@ -970,6 +1121,22 @@ def social_friends():
     if err:
         return err
     return jsonify({'success': True, **SOCIAL.list_friends(user['id'])})
+
+
+@app.route('/api/social/friends/suggest', methods=['POST'])
+def social_friend_suggest():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if not _rate_limit(f"suggest:{user['id']}", 8, 3600):
+        return _too_many()
+    emails = data.get('emails') if isinstance(data.get('emails'), list) else []
+    phones = data.get('phones') if isinstance(data.get('phones'), list) else []
+    return jsonify({
+        'success': True,
+        'results': SOCIAL.suggest_from_contacts(user['id'], emails, phones),
+    })
 
 
 @app.route('/api/social/friends/request', methods=['POST'])
@@ -1000,6 +1167,114 @@ def social_friend_respond():
         return jsonify({'success': True, **result})
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/social/friends/cancel', methods=['POST'])
+def social_friend_cancel():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.cancel_request(user["id"], int(data.get("friendship_id")))
+        return jsonify({"success": True})
+    except (TypeError, ValueError) as e:
+        message = str(e) if isinstance(e, ValueError) else "Friend request not found"
+        return jsonify({"success": False, "error": message}), 400
+
+
+@app.route('/api/social/friends/remove', methods=['POST'])
+def social_friend_remove():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.unfriend(user["id"], int(data.get("friendship_id")))
+        return jsonify({"success": True})
+    except (TypeError, ValueError) as e:
+        message = str(e) if isinstance(e, ValueError) else "Friend not found"
+        return jsonify({"success": False, "error": message}), 400
+
+
+@app.route('/api/social/blocks', methods=['POST'])
+def social_block():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.block_user(user["id"], data.get("public_id"))
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/social/blocks', methods=['DELETE'])
+def social_unblock():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        SOCIAL.unblock_user(user["id"], data.get("public_id"))
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/social/reports', methods=['POST'])
+def social_report():
+    user, err = _require_user()
+    if err:
+        return err
+    if not _rate_limit(f"report:{user['id']}", 20, 86400):
+        return _too_many()
+    data = request.get_json(silent=True) or {}
+    try:
+        report = SOCIAL.create_report(
+            user["id"],
+            data.get("reason"),
+            target_public_id=data.get("public_id"),
+            post_id=data.get("post_id"),
+            comment_id=data.get("comment_id"),
+        )
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    try:
+        deliver_report(
+            "SunCast report",
+            (
+                f"Report {report['id']} from @{user['username']}.\n"
+                f"Reason: {report['reason']}\n"
+                f"Review with ADMIN_TOKEN at GET /api/social/admin/reports."
+            ),
+        )
+    except Exception:
+        traceback.print_exc()
+    return jsonify({"success": True})
+
+
+@app.route('/api/social/admin/reports', methods=['GET'])
+def social_admin_reports():
+    expected = os.getenv("ADMIN_TOKEN", "")
+    provided = request.headers.get("X-Admin-Token", "")
+    if (
+        not expected
+        or not provided
+        or len(provided) != len(expected)
+        or not secrets.compare_digest(provided, expected)
+    ):
+        return jsonify({"success": False, "error": "Authentication required"}), 401
+    return jsonify({"success": True, "reports": SOCIAL.list_reports()})
+
+
+@app.route('/api/social/activity', methods=['GET'])
+def social_activity():
+    user, err = _require_user()
+    if err:
+        return err
+    return jsonify({"success": True, **SOCIAL.activity(user["id"])})
 
 
 @app.route('/api/social/feed', methods=['GET'])
@@ -1058,6 +1333,19 @@ def social_update_post(post_id):
         return jsonify({'success': False, 'error': str(e)}), 404
 
 
+@app.route('/api/social/posts/<int:post_id>', methods=['DELETE'])
+def social_delete_post(post_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        path = SOCIAL.delete_post(user["id"], post_id)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+    _delete_upload(path)
+    return jsonify({"success": True})
+
+
 @app.route('/api/social/posts/<int:post_id>/like', methods=['POST'])
 def social_like_post(post_id):
     user, err = _require_user()
@@ -1097,6 +1385,20 @@ def social_comment_post(post_id):
     except ValueError as e:
         status = 404 if str(e) == 'Post not found' else 400
         return jsonify({'success': False, 'error': str(e)}), status
+
+
+@app.route('/api/social/posts/<int:post_id>/comments/<int:comment_id>', methods=['DELETE'])
+def social_delete_comment(post_id, comment_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        post = SOCIAL.delete_comment(user['id'], post_id, comment_id)
+        return jsonify({'success': True, 'post': post})
+    except ValueError as e:
+        message = str(e)
+        status = 404 if message == 'Comment not found' or message == 'Post not found' else 403
+        return jsonify({'success': False, 'error': message}), status
 
 
 def _get_visual_description(prediction):
@@ -1159,6 +1461,11 @@ def frontend_file(asset_path):
     if not full.startswith(os.path.normpath(build)) or not os.path.isfile(full):
         return jsonify({'error': 'Endpoint not found'}), 404
     return send_from_directory(build, asset_path)
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def upload_too_large(error):
+    return jsonify({"success": False, "error": "Photo must be under 8 MB"}), 413
 
 
 @app.errorhandler(404)

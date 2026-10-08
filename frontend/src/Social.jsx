@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiJson, apiUrl, authHeaders } from './api';
 import { clearAuthToken, loadAuthToken, setAuthToken } from './authToken';
+import { readContactAddresses } from './deviceContacts';
+import { notifySocialActivity } from './socialAlerts';
 import './Social.css';
 
 const initialOf = (name) => (name || '?').trim().charAt(0).toUpperCase();
@@ -112,9 +114,77 @@ const RateBar = ({ value, onChange }) => {
   );
 };
 
-const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile, showPlace = true, children }) => {
+const REPORT_REASONS = ['Spam', 'Harassment', 'Inappropriate photo', 'Other'];
+
+const ReportControl = ({ onSubmit, label = 'Report' }) => {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState(REPORT_REASONS[0]);
+  const [note, setNote] = useState('');
+  const [blockToo, setBlockToo] = useState(true);
+  const [busy, setBusy] = useState(false);
+  if (!onSubmit) return null;
+  if (!open) {
+    return (
+      <button type="button" className="comment-delete" onClick={() => setOpen(true)}>
+        {label}
+      </button>
+    );
+  }
+  return (
+    <form
+      className="report-box"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        setBusy(true);
+        const text = note.trim() ? `${reason}: ${note.trim()}` : reason;
+        try {
+          await onSubmit({ reason: text, blockToo });
+          setOpen(false);
+          setNote('');
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <select value={reason} onChange={(event) => setReason(event.target.value)} aria-label="Report reason">
+        {REPORT_REASONS.map((item) => <option key={item}>{item}</option>)}
+      </select>
+      <input
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        placeholder="What happened?"
+        maxLength={400}
+      />
+      <label className="check-row">
+        <input type="checkbox" checked={blockToo} onChange={(event) => setBlockToo(event.target.checked)} />
+        Block this person too
+      </label>
+      <div className="row-actions">
+        <button type="submit" disabled={busy}>{busy ? 'Sending…' : 'Send report'}</button>
+        <button type="button" className="ghost" onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </form>
+  );
+};
+
+const PostCard = ({
+  id,
+  post,
+  burstKey,
+  onLike,
+  onRate,
+  onComment,
+  onDeleteComment,
+  onOpenProfile,
+  onReport,
+  viewerId,
+  showPlace = true,
+  children,
+}) => {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
   const lastTap = useRef(0);
 
   const onPhotoClick = () => {
@@ -135,6 +205,21 @@ const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile
       setDraft('');
     } finally {
       setSending(false);
+    }
+  };
+
+  const removeComment = async (commentId) => {
+    if (!onDeleteComment || deletingId) return;
+    if (pendingDelete !== commentId) {
+      setPendingDelete(commentId);
+      return;
+    }
+    setDeletingId(commentId);
+    try {
+      await onDeleteComment(post, commentId);
+      setPendingDelete(null);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -181,6 +266,15 @@ const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile
             ? `${ratingLabel(post.rating_average)} average · ${post.rating_count}`
             : 'No ratings yet'}
         </p>
+        {viewerId !== post.user_id && (
+          <ReportControl
+            onSubmit={(payload) => onReport?.({
+              ...payload,
+              public_id: post.public_id,
+              post_id: post.id,
+            })}
+          />
+        )}
       </div>
       <RateBar value={post.my_rating} onChange={(score) => onRate(post, score)} />
       <div className="post-body">
@@ -195,7 +289,46 @@ const PostCard = ({ id, post, burstKey, onLike, onRate, onComment, onOpenProfile
               />
               <p>
                 <strong>{comment.display_name}</strong> {comment.body}
-                <span className="muted">{timeLabel(comment)}</span>
+                <span className="comment-meta">
+                  <span className="muted">{timeLabel(comment)}</span>
+                  {(viewerId === comment.user_id || viewerId === post.user_id) && (
+                    pendingDelete === comment.id ? (
+                      <>
+                        <span className="muted">Delete this comment?</span>
+                        <button
+                          type="button"
+                          className="comment-delete"
+                          disabled={deletingId === comment.id}
+                          onClick={() => removeComment(comment.id)}
+                        >
+                          {deletingId === comment.id ? 'Deleting…' : 'Delete'}
+                        </button>
+                        <button type="button" className="comment-delete" onClick={() => setPendingDelete(null)}>
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="comment-delete"
+                        onClick={() => removeComment(comment.id)}
+                      >
+                        Delete
+                      </button>
+                    )
+                  )}
+                  {viewerId !== comment.user_id && (
+                    <ReportControl
+                      label="Report"
+                      onSubmit={(payload) => onReport?.({
+                        ...payload,
+                        public_id: comment.public_id,
+                        post_id: post.id,
+                        comment_id: comment.id,
+                      })}
+                    />
+                  )}
+                </span>
               </p>
             </div>
           ))}
@@ -230,7 +363,7 @@ const timeLabel = (post) => {
   return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-const Social = () => {
+const Social = ({ eveningDraft, onEveningDraftUsed }) => {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState('login');
   const [form, setForm] = useState({
@@ -247,12 +380,22 @@ const Social = () => {
   const [friendQuery, setFriendQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searched, setSearched] = useState(false);
+  const [contactSuggestions, setContactSuggestions] = useState([]);
+  const [contactsBusy, setContactsBusy] = useState(false);
+  const [contactNote, setContactNote] = useState(null);
   const [notice, setNotice] = useState(null);
   const [caption, setCaption] = useState('');
   const [locationName, setLocationName] = useState('');
+  const [sunsetDate, setSunsetDate] = useState('');
   const [photo, setPhoto] = useState(null);
   const [error, setError] = useState(null);
   const [resetMessage, setResetMessage] = useState(null);
+  const [resetCode, setResetCode] = useState('');
+  const [devCode, setDevCode] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
+  const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
+  const [confirmDeletePost, setConfirmDeletePost] = useState(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState('feed');
   const [myPosts, setMyPosts] = useState([]);
@@ -286,6 +429,9 @@ const Social = () => {
     ]);
     setFeed(feedRes.posts || []);
     setFriends(friendRes);
+    apiJson('/api/social/activity')
+      .then((activity) => notifySocialActivity(activity))
+      .catch(() => {});
   };
 
   const loadMyPosts = async () => {
@@ -323,6 +469,24 @@ const Social = () => {
   useEffect(() => {
     restoreSession();
   }, [restoreSession]);
+
+  useEffect(() => {
+    if (!user) return undefined;
+    const timer = window.setInterval(() => {
+      apiJson('/api/social/activity').then((activity) => notifySocialActivity(activity)).catch(() => {});
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [user]);
+
+  useEffect(() => {
+    if (!eveningDraft || !user) return;
+    setLocationName(eveningDraft.location || '');
+    setCaption(eveningDraft.caption || '');
+    setSunsetDate(eveningDraft.date || '');
+    setView('compose');
+    setNotice('Add a photo, then share this evening.');
+    onEveningDraftUsed?.();
+  }, [eveningDraft, user, onEveningDraftUsed]);
 
   const openedPostId = view === 'post' ? activePost?.id : null;
   useEffect(() => {
@@ -386,8 +550,32 @@ const Social = () => {
     }
   };
 
+  const handleForgot = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setDevCode('');
+    try {
+      const data = await apiJson('/api/social/password/forgot', {
+        method: 'POST',
+        body: JSON.stringify({ contact: form.login_id }),
+      });
+      setCodeSent(true);
+      setResetMessage(data.message || 'If an account uses that email or phone, we sent a code.');
+      if (data.dev_code) setDevCode(data.dev_code);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleReset = async (e) => {
     e.preventDefault();
+    if (!codeSent) {
+      await handleForgot(e);
+      return;
+    }
     if (form.password !== form.confirm) {
       setError('Passwords do not match');
       return;
@@ -397,11 +585,18 @@ const Social = () => {
     try {
       await apiJson('/api/social/password/reset', {
         method: 'POST',
-        body: JSON.stringify({ contact: form.login_id, password: form.password }),
+        body: JSON.stringify({
+          contact: form.login_id,
+          code: resetCode,
+          password: form.password,
+        }),
       });
       setForm((prev) => ({ ...prev, password: '', confirm: '' }));
+      setResetCode('');
+      setDevCode('');
+      setCodeSent(false);
       setAuthMode('login');
-      setResetMessage('Password updated. Sign in with your email or phone.');
+      setResetMessage('Password updated. Sign in with your email or phone. Other devices were signed out.');
     } catch (err) {
       setError(err.message);
     } finally {
@@ -410,6 +605,11 @@ const Social = () => {
   };
 
   const logout = async () => {
+    try {
+      await apiJson('/api/social/logout', { method: 'POST' });
+    } catch (err) {
+      // The token is cleared on this device either way.
+    }
     await clearAuthToken();
     setUser(null);
     setFeed([]);
@@ -443,11 +643,13 @@ const Social = () => {
       });
       await refresh();
       const relation = data.status === 'accepted' ? 'friends' : 'outgoing';
-      setSearchResults((prev) => prev.map((person) => (
+      const mark = (person) => (
         person.username.toLowerCase() === username.toLowerCase()
           ? { ...person, relation, friendship_id: data.id }
           : person
-      )));
+      );
+      setSearchResults((prev) => prev.map(mark));
+      setContactSuggestions((prev) => prev.map(mark));
       setNotice(
         data.status === 'accepted'
           ? `You and @${username} are now friends`
@@ -467,14 +669,186 @@ const Social = () => {
         body: JSON.stringify({ friendship_id: friendshipId, accept }),
       });
       await refresh();
-      setSearchResults((prev) => prev.map((person) => (
+      const mark = (person) => (
         person.friendship_id === friendshipId
           ? { ...person, relation: accept ? 'friends' : 'none' }
           : person
-      )));
+      );
+      setSearchResults((prev) => prev.map(mark));
+      setContactSuggestions((prev) => prev.map(mark));
       if (accept) setNotice('Friend request accepted');
     } catch (err) {
       setError(err.message);
+    }
+  };
+
+  const cancelRequest = async (friendshipId) => {
+    setError(null);
+    try {
+      await apiJson('/api/social/friends/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ friendship_id: friendshipId }),
+      });
+      await refresh();
+      setNotice('Request canceled');
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const unfriend = async (person) => {
+    setError(null);
+    try {
+      await apiJson('/api/social/friends/remove', {
+        method: 'POST',
+        body: JSON.stringify({ friendship_id: person.friendship_id }),
+      });
+      await refresh();
+      setNotice(`@${person.username} was removed from your friends`);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const blockPerson = async (publicId) => {
+    setError(null);
+    try {
+      await apiJson('/api/social/blocks', {
+        method: 'POST',
+        body: JSON.stringify({ public_id: publicId }),
+      });
+      setViewedProfile(null);
+      setView('feed');
+      await refresh();
+      setNotice('Blocked. Their posts are hidden and they cannot request you.');
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const unblockPerson = async (publicId) => {
+    setError(null);
+    try {
+      await apiJson('/api/social/blocks', {
+        method: 'DELETE',
+        body: JSON.stringify({ public_id: publicId }),
+      });
+      await refresh();
+      setNotice('Unblocked');
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const reportContent = async (payload) => {
+    setError(null);
+    try {
+      await apiJson('/api/social/reports', {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: payload.reason,
+          public_id: payload.public_id,
+          post_id: payload.post_id,
+          comment_id: payload.comment_id,
+        }),
+      });
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+    if (payload.blockToo && payload.public_id) {
+      await blockPerson(payload.public_id);
+      return;
+    }
+    setNotice('Report sent');
+  };
+
+  const removePost = async (post) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await apiJson(`/api/social/posts/${post.id}`, { method: 'DELETE' });
+      setConfirmDeletePost(null);
+      setEditingPostId(null);
+      if (activePost?.id === post.id) setActivePost(null);
+      setView('profile');
+      await Promise.all([refresh(), loadMyPosts()]);
+      setNotice('Post deleted');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changePassword = async (event) => {
+    event.preventDefault();
+    if (passwordForm.next !== passwordForm.confirm) {
+      setError('Passwords do not match');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiJson('/api/social/me/password', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: passwordForm.current,
+          password: passwordForm.next,
+        }),
+      });
+      setPasswordForm({ current: '', next: '', confirm: '' });
+      setNotice('Password updated. Other devices were signed out.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiJson('/api/social/me', { method: 'DELETE' });
+      await clearAuthToken();
+      setUser(null);
+      setFeed([]);
+      setMyPosts([]);
+      setView('feed');
+      setConfirmDeleteAccount(false);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const findFromContacts = async () => {
+    setError(null);
+    setNotice(null);
+    setContactNote(null);
+    setContactsBusy(true);
+    try {
+      const { emails, phones } = await readContactAddresses();
+      if (!emails.length && !phones.length) {
+        setContactSuggestions([]);
+        setContactNote('None of those contacts have an email or phone number.');
+        return;
+      }
+      const data = await apiJson('/api/social/friends/suggest', {
+        method: 'POST',
+        body: JSON.stringify({ emails, phones }),
+      });
+      const results = data.results || [];
+      setContactSuggestions(results);
+      setContactNote(results.length ? null : 'None of your contacts are on SunCast yet.');
+    } catch (err) {
+      if (err?.code === 'cancelled') return;
+      setContactSuggestions([]);
+      setContactNote(err.message);
+    } finally {
+      setContactsBusy(false);
     }
   };
 
@@ -497,7 +871,11 @@ const Social = () => {
       body.append('photo', photo);
       body.append('caption', caption);
       body.append('location_name', locationName);
-      body.append('sunset_date', new Date().toISOString().slice(0, 10));
+      body.append('sunset_date', sunsetDate || new Date().toISOString().slice(0, 10));
+      if (caption.match(/\/10/)) {
+        const score = Number(caption.match(/(\d+(?:\.\d+)?)\/10/)?.[1]);
+        if (score) body.append('aesthetic_score', String(score));
+      }
       const res = await fetch(apiUrl('/api/social/posts'), {
         method: 'POST',
         headers: await authHeaders(),
@@ -507,6 +885,7 @@ const Social = () => {
       if (!res.ok) throw new Error(data.error || 'Upload failed');
       setCaption('');
       setLocationName('');
+      setSunsetDate('');
       setPhoto(null);
       setView('feed');
       await Promise.all([refresh(), loadMyPosts()]);
@@ -534,8 +913,8 @@ const Social = () => {
   };
 
   const openUserProfile = async (person) => {
-    const id = person?.id || person?.user_id;
-    if (!id || id === user.id) {
+    const id = person?.public_id;
+    if (!id || person?.id === user.id || person?.user_id === user.id) {
       await openProfile();
       return;
     }
@@ -556,11 +935,25 @@ const Social = () => {
     });
     try {
       const data = await apiJson(`/api/social/users/${id}`);
-      setViewedProfile({ user: data.user, posts: data.posts || [], loading: false });
+      setViewedProfile({
+        user: data.user,
+        posts: data.posts || [],
+        postsVisible: data.posts_visible !== false,
+        loading: false,
+      });
     } catch (err) {
       setViewedProfile((current) => (current ? { ...current, loading: false } : current));
       setError(err.message);
     }
+  };
+
+  const applyAvatar = (next) => {
+    setUser(next);
+    const stamp = (post) => (
+      post.user_id === next.id ? { ...post, avatar_url: next.avatar_url } : post
+    );
+    setFeed((prev) => prev.map(stamp));
+    setMyPosts((prev) => prev.map(stamp));
   };
 
   const changeAvatar = async (file) => {
@@ -577,7 +970,20 @@ const Social = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not update photo');
-      setUser(data.user);
+      applyAvatar(data.user);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeAvatar = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await apiJson('/api/social/me/avatar', { method: 'DELETE' });
+      applyAvatar(data.user);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -712,6 +1118,19 @@ const Social = () => {
     }
   };
 
+  const deleteComment = async (post, commentId) => {
+    setError(null);
+    try {
+      const data = await apiJson(`/api/social/posts/${post.id}/comments/${commentId}`, {
+        method: 'DELETE',
+      });
+      rememberPost(data.post);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+  };
+
   const goBack = () => {
     setError(null);
     setEditingPostId(null);
@@ -734,6 +1153,19 @@ const Social = () => {
     }
     setViewedProfile(null);
     setView('feed');
+  };
+
+  const relationButton = (person) => {
+    if (person.relation === 'friends') {
+      return <button type="button" className="ghost" onClick={() => unfriend(person)}>Unfriend</button>;
+    }
+    if (person.relation === 'outgoing') {
+      return <button type="button" className="ghost" onClick={() => cancelRequest(person.friendship_id)}>Cancel</button>;
+    }
+    if (person.relation === 'incoming') {
+      return <button type="button" onClick={() => respond(person.friendship_id, true)}>Accept</button>;
+    }
+    return <button type="button" onClick={() => sendRequest(person.username)}>Add</button>;
   };
 
   const titles = {
@@ -792,7 +1224,11 @@ const Social = () => {
             </div>
           )}
           {authMode === 'forgot' && (
-            <p className="muted">Enter the email or phone on your account, then choose a new password.</p>
+            <p className="muted">
+              {codeSent
+                ? 'Enter the code we sent, then choose a new password.'
+                : 'Enter the email or phone on your account. We will send a code before the password changes.'}
+            </p>
           )}
           {authMode === 'register' && (
             <label>
@@ -850,17 +1286,36 @@ const Social = () => {
               </label>
             </>
           )}
-          <label>
-            {authMode === 'forgot' ? 'New password' : 'Password'}
-            <input
-              required
-              type="password"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-              autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-            />
-          </label>
-          {authMode === 'forgot' && (
+          {authMode === 'forgot' && codeSent && (
+            <label>
+              Code
+              <input
+                required
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={resetCode}
+                onChange={(e) => setResetCode(e.target.value)}
+                placeholder="6-digit code"
+              />
+            </label>
+          )}
+          {devCode && authMode === 'forgot' && (
+            <p className="social-notice">Development code: {devCode}</p>
+          )}
+          {resetMessage && authMode === 'forgot' && <p className="social-notice">{resetMessage}</p>}
+          {(authMode !== 'forgot' || codeSent) && (
+            <label>
+              {authMode === 'forgot' ? 'New password' : 'Password'}
+              <input
+                required
+                type="password"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+              />
+            </label>
+          )}
+          {authMode === 'forgot' && codeSent && (
             <label>
               Confirm password
               <input
@@ -875,15 +1330,15 @@ const Social = () => {
           {resetMessage && authMode === 'login' && <p className="social-notice">{resetMessage}</p>}
           {error && <p className="social-error">{error}</p>}
           <button type="submit" disabled={busy}>
-            {busy ? 'Please wait…' : authMode === 'login' ? 'Sign in' : authMode === 'forgot' ? 'Reset password' : 'Join SunCast'}
+            {busy ? 'Please wait…' : authMode === 'login' ? 'Sign in' : authMode === 'forgot' ? (codeSent ? 'Reset password' : 'Send code') : 'Join SunCast'}
           </button>
           {authMode === 'login' && (
-            <button type="button" className="auth-switch" onClick={() => { setAuthMode('forgot'); setError(null); setResetMessage(null); }}>
+            <button type="button" className="auth-switch" onClick={() => { setAuthMode('forgot'); setError(null); setResetMessage(null); setCodeSent(false); setDevCode(''); }}>
               Forgot password?
             </button>
           )}
           {authMode === 'forgot' && (
-            <button type="button" className="auth-switch" onClick={() => { setAuthMode('login'); setError(null); }}>
+            <button type="button" className="auth-switch" onClick={() => { setAuthMode('login'); setError(null); setCodeSent(false); setDevCode(''); }}>
               Back to sign in
             </button>
           )}
@@ -934,7 +1389,10 @@ const Social = () => {
               onLike={toggleLike}
               onRate={ratePost}
               onComment={commentOn}
+              onDeleteComment={deleteComment}
               onOpenProfile={openUserProfile}
+              onReport={reportContent}
+              viewerId={user.id}
             >
               {post.caption ? (
                 <p><strong>{post.display_name}</strong> {post.caption}</p>
@@ -969,6 +1427,14 @@ const Social = () => {
               value={locationName}
               onChange={(e) => setLocationName(e.target.value)}
               placeholder="Boston, MA"
+            />
+          </label>
+          <label>
+            Date
+            <input
+              type="date"
+              value={sunsetDate}
+              onChange={(e) => setSunsetDate(e.target.value)}
             />
           </label>
           <label>
@@ -1008,9 +1474,22 @@ const Social = () => {
           <div className="profile-bio">
             <h3>{viewedProfile.user.display_name}</h3>
             <p className="username">@{viewedProfile.user.username}</p>
+            <div className="row-actions">
+              <button type="button" className="ghost" onClick={() => blockPerson(viewedProfile.user.public_id)}>
+                Block
+              </button>
+              <ReportControl
+                onSubmit={(payload) => reportContent({
+                  ...payload,
+                  public_id: viewedProfile.user.public_id,
+                })}
+              />
+            </div>
           </div>
           {viewedProfile.loading ? (
             <p className="muted empty-grid">Loading sunsets…</p>
+          ) : viewedProfile.postsVisible === false ? (
+            <p className="muted empty-grid">Add them as a friend to see their sunsets.</p>
           ) : viewedProfile.posts.length === 0 ? (
             <p className="muted empty-grid">No sunsets yet.</p>
           ) : (
@@ -1034,16 +1513,23 @@ const Social = () => {
       {view === 'profile' && !viewedProfile && (
         <div className="profile">
           <div className="profile-top">
-            <label className="avatar-wrap">
-              <Avatar user={user} />
-              <span>{busy ? 'Saving…' : 'Edit photo'}</span>
-              <input
-                type="file"
-                accept="image/*"
-                disabled={busy}
-                onChange={(e) => changeAvatar(e.target.files?.[0])}
-              />
-            </label>
+            <div className="avatar-column">
+              <label className="avatar-wrap">
+                <Avatar user={user} />
+                <span>{busy ? 'Saving…' : 'Edit photo'}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={busy}
+                  onChange={(e) => changeAvatar(e.target.files?.[0])}
+                />
+              </label>
+              {user.avatar_url && (
+                <button type="button" className="text-btn avatar-remove" onClick={removeAvatar} disabled={busy}>
+                  Remove photo
+                </button>
+              )}
+            </div>
             <div className="profile-stats" aria-label="Profile stats">
               <div>
                 <strong>{myPosts.length}</strong>
@@ -1111,6 +1597,38 @@ const Social = () => {
               <button type="button" className="edit-profile" onClick={startIdentityEdit}>
                 Edit profile
               </button>
+              <form className="profile-form" onSubmit={changePassword}>
+                <label>
+                  Current password
+                  <input
+                    type="password"
+                    value={passwordForm.current}
+                    onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })}
+                    autoComplete="current-password"
+                  />
+                </label>
+                <label>
+                  New password
+                  <input
+                    type="password"
+                    value={passwordForm.next}
+                    onChange={(e) => setPasswordForm({ ...passwordForm, next: e.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <label>
+                  Confirm new password
+                  <input
+                    type="password"
+                    value={passwordForm.confirm}
+                    onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <button type="submit" disabled={busy || !passwordForm.current || !passwordForm.next}>
+                  Change password
+                </button>
+              </form>
             </div>
           )}
 
@@ -1133,6 +1651,21 @@ const Social = () => {
           )}
 
           <button type="button" className="text-btn sign-out" onClick={logout}>Sign out</button>
+          {confirmDeleteAccount ? (
+            <div className="report-box">
+              <p>This permanently removes your profile, posts, and photos.</p>
+              <div className="row-actions">
+                <button type="button" className="comment-delete" onClick={deleteAccount} disabled={busy}>
+                  {busy ? 'Deleting…' : 'Delete account'}
+                </button>
+                <button type="button" className="ghost" onClick={() => setConfirmDeleteAccount(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" className="text-btn sign-out" onClick={() => setConfirmDeleteAccount(true)}>
+              Delete account
+            </button>
+          )}
         </div>
       )}
 
@@ -1148,7 +1681,10 @@ const Social = () => {
               onLike={toggleLike}
               onRate={ratePost}
               onComment={commentOn}
+              onDeleteComment={deleteComment}
               onOpenProfile={openUserProfile}
+              onReport={reportContent}
+              viewerId={user.id}
             >
               {editingPostId === post.id ? (
                 <form className="profile-form" onSubmit={savePost}>
@@ -1192,9 +1728,24 @@ const Social = () => {
                     {post.sunset_date ? ` · ${post.sunset_date}` : ''}
                   </span>
                   {post.user_id === user.id && (
-                    <button type="button" className="text-btn" onClick={() => startPostEdit(post)}>
-                      Edit post
-                    </button>
+                    <div className="row-actions">
+                      <button type="button" className="text-btn" onClick={() => startPostEdit(post)}>
+                        Edit post
+                      </button>
+                      {confirmDeletePost === post.id ? (
+                        <>
+                          <span className="muted">Delete this post?</span>
+                          <button type="button" className="comment-delete" onClick={() => removePost(post)} disabled={busy}>
+                            Delete
+                          </button>
+                          <button type="button" className="ghost" onClick={() => setConfirmDeletePost(null)}>Keep</button>
+                        </>
+                      ) : (
+                        <button type="button" className="comment-delete" onClick={() => setConfirmDeletePost(post.id)}>
+                          Delete post
+                        </button>
+                      )}
+                    </div>
                   )}
                 </>
               )}
@@ -1205,6 +1756,25 @@ const Social = () => {
 
       {view === 'friends' && (
         <div className="friends-panel">
+          <button type="button" className="contacts-find" onClick={findFromContacts} disabled={contactsBusy}>
+            {contactsBusy ? 'Checking contacts…' : 'Find friends in contacts'}
+          </button>
+          {contactNote && <p className="muted">{contactNote}</p>}
+          {contactSuggestions.length > 0 && (
+            <div className="friend-block">
+              <p className="eyebrow">From your contacts</p>
+              {contactSuggestions.map((person) => (
+                <div key={person.id} className="friend-row">
+                  <Avatar user={person} className="avatar avatar-sm" onClick={() => openUserProfile(person)} />
+                  <span className="friend-name">
+                    {person.display_name}
+                    <span className="muted">@{person.username}</span>
+                  </span>
+                  {relationButton(person)}
+                </div>
+              ))}
+            </div>
+          )}
           <form className="friend-search" onSubmit={searchFriends}>
             <input
               value={friendQuery}
@@ -1222,14 +1792,7 @@ const Social = () => {
                 {person.display_name}
                 <span className="muted">@{person.username}</span>
               </span>
-              {person.relation === 'friends' && <button type="button" disabled>Friends</button>}
-              {person.relation === 'outgoing' && <button type="button" disabled>Requested</button>}
-              {person.relation === 'incoming' && (
-                <button type="button" onClick={() => respond(person.friendship_id, true)}>Accept</button>
-              )}
-              {(!person.relation || person.relation === 'none') && (
-                <button type="button" onClick={() => sendRequest(person.username)}>Add</button>
-              )}
+              {relationButton(person)}
             </div>
           ))}
           {searched && searchResults.length === 0 && <p className="muted">No one found with that name</p>}
@@ -1263,7 +1826,7 @@ const Social = () => {
                     {person.display_name}
                     <span className="muted">@{person.username}</span>
                   </span>
-                  <span className="muted">Pending</span>
+                  <button type="button" className="ghost" onClick={() => cancelRequest(person.friendship_id)}>Cancel</button>
                 </div>
               ))}
             </div>
@@ -1279,9 +1842,25 @@ const Social = () => {
                   {person.display_name}
                   <span className="muted">@{person.username}</span>
                 </span>
+                <button type="button" className="ghost" onClick={() => unfriend(person)}>Unfriend</button>
               </div>
             ))}
           </div>
+          {(friends.blocked || []).length > 0 && (
+            <div className="friend-block">
+              <p className="eyebrow">Blocked</p>
+              {friends.blocked.map((person) => (
+                <div key={person.public_id} className="friend-row">
+                  <Avatar user={person} className="avatar avatar-sm" />
+                  <span className="friend-name">
+                    {person.display_name}
+                    <span className="muted">@{person.username}</span>
+                  </span>
+                  <button type="button" className="ghost" onClick={() => unblockPerson(person.public_id)}>Unblock</button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </section>

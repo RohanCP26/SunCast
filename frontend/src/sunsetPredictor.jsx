@@ -61,7 +61,9 @@ const generateSunsetGradient = (hue, saturation, brightness) => {
   return `linear-gradient(180deg, #120c22 0%, #4a2140 38%, ${mid} 72%, #f8d7a8 100%)`;
 };
 
-const SunsetPredictor = () => {
+const SAVED_VIEWPOINT_KEY = 'suncast_saved_viewpoint';
+
+const SunsetPredictor = ({ onShareEvening }) => {
   const [location, setLocation] = useState(DEFAULT_LOCATION);
   const [week, setWeek] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -72,10 +74,32 @@ const SunsetPredictor = () => {
   const [imageLoading, setImageLoading] = useState(false);
   const [imageError, setImageError] = useState(null);
   const [viewpoints, setViewpoints] = useState([]);
+  const [savedViewpoint, setSavedViewpoint] = useState(null);
   const [viewpointsLoading, setViewpointsLoading] = useState(false);
   const [locating, setLocating] = useState(false);
   const userPickedLocation = useRef(false);
   const requestId = useRef(0);
+
+  useEffect(() => {
+    try {
+      setSavedViewpoint(JSON.parse(localStorage.getItem(SAVED_VIEWPOINT_KEY) || 'null'));
+    } catch {
+      setSavedViewpoint(null);
+    }
+  }, []);
+
+  const saveViewpoint = (spot) => {
+    const saved = {
+      name: spot.name,
+      maps_url: spot.maps_url,
+      latitude: spot.latitude,
+      longitude: spot.longitude,
+      date: selected?.date || '',
+      place: week?.location?.name || location.location_name || '',
+    };
+    localStorage.setItem(SAVED_VIEWPOINT_KEY, JSON.stringify(saved));
+    setSavedViewpoint(saved);
+  };
 
   const selected = week?.days?.find((d) => d.date === selectedDate) || week?.days?.[0];
 
@@ -365,6 +389,17 @@ const SunsetPredictor = () => {
                 <div className="score-copy">
                   <strong>{selected.aesthetic_label}</strong>
                   <span>Sunset {selected.sunset_time || '—'}</span>
+                  <button
+                    type="button"
+                    className="text-link"
+                    onClick={() => onShareEvening?.({
+                      location: week?.location?.name || location.location_name || '',
+                      date: selected.date,
+                      caption: `${selected.aesthetic_score.toFixed(1)}/10 ${selected.aesthetic_label.toLowerCase()} sunset`,
+                    })}
+                  >
+                    Share this evening
+                  </button>
                 </div>
               </div>
 
@@ -457,15 +492,19 @@ const SunsetPredictor = () => {
               Head to higher or open west-facing ground before sunset
               {selected.sunset_time ? ` (${selected.sunset_time})` : ''}.
             </p>
+            {savedViewpoint?.name && (
+              <p className="sample-note">
+                Saved for {savedViewpoint.date || 'this evening'}: {savedViewpoint.name}
+                {' · '}
+                <a href={savedViewpoint.maps_url} target="_blank" rel="noreferrer">Open in Maps</a>
+              </p>
+            )}
             {viewpointsLoading && <p className="muted">Finding scenic overlooks…</p>}
             <div className="viewpoint-list">
               {viewpoints.slice(0, 4).map((spot) => (
-                <a
+                <div
                   key={`${spot.name}-${spot.latitude}`}
                   className="viewpoint-card"
-                  href={spot.maps_url}
-                  target="_blank"
-                  rel="noreferrer"
                 >
                   <strong>{spot.name}</strong>
                   <span>
@@ -474,7 +513,13 @@ const SunsetPredictor = () => {
                     {spot.distance_km != null ? ` · ${spot.distance_km} km ${spot.direction || ''}` : ''}
                   </span>
                   <p>{spot.why}</p>
-                </a>
+                  <div className="viewpoint-actions">
+                    <a href={spot.maps_url} target="_blank" rel="noreferrer">Open in Maps</a>
+                    <button type="button" onClick={() => saveViewpoint(spot)}>
+                      {savedViewpoint?.name === spot.name && savedViewpoint?.date === selected?.date ? 'Saved' : 'Save for tonight'}
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </section>

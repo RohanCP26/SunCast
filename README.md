@@ -34,13 +34,19 @@ The hero accepts a place name or a "use my location" request. The week strip sho
 
 ### Social
 
-Social is a separate store, not a feature of the weather model. Accounts, friendships, and posts live in SQLite at `backend/data/suncast_social.db`. Photos sit in `backend/uploads` and are served at `/uploads/<filename>`.
+Social is a separate store, not a feature of the weather model. Accounts, friendships, and posts live in SQLite at `backend/data/suncast_social.db`. Photos sit in `backend/uploads` and are served at `/uploads/<filename>`. On Railway, attach a volume mounted at `/data`. The app stores the database and photos under `RAILWAY_VOLUME_MOUNT_PATH` when that variable is present, which Railway sets for the volume. Without a volume, the next deploy starts from an empty database. `/api/health` reports `persistent_storage` so you can confirm the volume is attached.
 
-- Sign in or create an account. The session is a bearer token kept in the browser as `suncast_token`.
-- Search for someone by name or username and send a friend request. Sent requests stay listed as pending. If that person already requested you, adding them accepts the request.
-- Incoming requests can be accepted or declined.
-- Post a sunset photo with a place and a caption. The feed shows your posts and posts from accepted friends.
-- Your profile holds your photo, name, and username, every post you can edit, and a friend count that opens the full friends list.
+Sign in with the email, phone number, or username on the account. Username matching ignores capitals. A new account needs a username, a password of at least 6 characters, and an email or a phone number. Forgot password sends a 6-digit code to that email, or by text when the account has only a phone and Twilio is configured. The password changes only after the code is entered, and every existing session is signed out. Email delivery uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`. Text delivery uses `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_FROM_NUMBER`. A session lasts 30 days. Sign out removes it from the device and the server. Changing a password from the profile signs out every other device.
+
+Friends can be found by searching a name or username. A request stays pending until the other person accepts, and the sender can cancel it. If they already asked you, adding them accepts it. Incoming requests can be declined. Friends can be removed. On a phone, Find friends in contacts asks for contact access, then lists people whose saved email or phone matches an account. That list is used for the search and is not stored. A contact phone matches with or without a leading 1. Block hides that person's posts and stops new requests. Report stores a reason, and emails it to `REPORT_EMAIL` when SMTP is set. `ADMIN_TOKEN` unlocks `GET /api/social/admin/reports`.
+
+The home feed is posts from accepted friends. Your own posts stay on your profile. Someone who is not a friend can see your name and username, not your posts. A post is a photo plus an optional caption, place, and date. Friends can like a post, rate it from 1 to 10, or comment. You can delete a comment you wrote, and you can delete any comment on your own post. Deleting a comment asks you to confirm. You can delete your own post. The average of ratings on your posts shows on your profile. A new friend request or a comment on your post raises a local notification the next time the app checks, including while Social is open.
+
+Your profile has a photo, or the first letter of your name when there is no photo. Edit photo replaces it. Remove photo clears it. Edit profile changes the display name, username, email, and phone. Delete account removes the profile, posts, and photos. The friend count opens the friends list. Tapping a photo opens a feed of that person's posts, scrolled to the one you tapped.
+
+From a forecast day, Share this evening opens a new post with that place, date, and score filled in. A viewpoint can be saved for the evening and opened in Maps.
+
+Forecast and Social sit side by side. A horizontal swipe moves between them. The navigation bar stays put.
 
 ## Where the code lives
 
@@ -49,15 +55,18 @@ Social is a separate store, not a feature of the weather model. Accounts, friend
 | `frontend/src/App.jsx` | Tabs and page chrome |
 | `frontend/src/sunsetPredictor.jsx` | Week forecast, viewpoints, rendition |
 | `frontend/src/deviceLocation.js` | GPS on the web and on a phone, then a place name |
+| `frontend/src/deviceContacts.js` | Contact permission on a phone, then emails and phone numbers |
 | `frontend/src/notifications.js` | Local alerts for high-scoring evenings on a phone |
-| `frontend/src/Social.jsx` | Accounts, friends, feed, profile |
+| `frontend/src/authToken.js` | Session token in Preferences and local storage |
+| `frontend/src/Social.jsx` | Accounts, friends, feed, comments, and profile |
 | `frontend/src/api.js` | API address, auth header, and fetch helper |
 | `backend/App.py` | Flask API that joins weather, the model, images, viewpoints, and social |
 | `backend/model/sunset_data_pipeline.py` | Geocoding, Open-Meteo forecast, sunset-hour snapshots, solar geometry |
 | `backend/model/sunset_ml_models.py` | Gradient-boosting model, prompt text, and the 1–10 score |
 | `backend/model/image_generator.py` | Hosted image APIs, with a local Pillow sky as the fallback |
 | `backend/viewpoints.py` | Overlooks and peaks from OpenStreetMap |
-| `backend/social_store.py` | Users, friendships, and posts |
+| `backend/social_store.py` | Users, friendships, posts, likes, ratings, and comments |
+| `privacy-policy.md` | Privacy policy text |
 | `frontend/ios` and `frontend/android` | Capacitor shells that load the built web app |
 
 `SunsetCNNModel` in the model file is an unused sketch. The running forecast uses gradient boosting only.
@@ -66,7 +75,7 @@ Social is a separate store, not a feature of the weather model. Accounts, friend
 
 In the browser the API is `http://localhost:5001`. The Flask app listens on all interfaces, port 5001.
 
-A phone cannot use localhost, because that name means the phone itself. The native build uses the computer's Wi-Fi address in `frontend/src/api.js` (`DEVICE_API_BASE`) and in `frontend/.env.production` (`REACT_APP_API_URL`). The phone and the computer need to be on the same Wi-Fi, and the backend has to be running before the app is opened. If the computer's IP changes, update both places, then rebuild and sync:
+The iPhone build talks to the hosted API at `https://suncast-production.up.railway.app` (`DEVICE_API_BASE` in `frontend/src/api.js`, and `REACT_APP_API_URL` in `frontend/.env.production`). A new screen or a new API route reaches the phone only after the web app is rebuilt and the matching server code is what Railway is running. Rebuild and sync with:
 
 ```bash
 cd frontend
@@ -81,7 +90,7 @@ Railway’s default builder, Railpack, only starts a build when it can tell what
 
 The repo now includes a root `requirements.txt`, a `railpack.json` that installs Python 3.11, builds the frontend, and starts the API, and a `Dockerfile` that does the same thing in one image. `railway.toml` tells Railway to use that Dockerfile. The hosted site serves the React app and the API from the same host, so the browser calls `/api/...` on the Railway URL.
 
-Push these files to the GitHub branch Railway is deploying, then redeploy. In the service settings, the builder should be Dockerfile. The health check is `/api/health`.
+Push these files to the GitHub branch Railway is deploying, then redeploy. In the service settings, the builder should be Dockerfile. The health check is `/api/health`. In the same service, add a volume mounted at `/data` before relying on accounts surviving a deploy. Set `SMTP_HOST`, `SMTP_FROM`, and the matching SMTP login so password reset can send a code, and set `ADMIN_TOKEN` so reports can be listed.
 
 ## Run it locally
 

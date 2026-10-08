@@ -7,6 +7,7 @@ const SWIPE_SLOP = 12;
 
 function App() {
   const [index, setIndex] = useState(0);
+  const [eveningDraft, setEveningDraft] = useState(null);
   const [dragX, setDragX] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [heights, setHeights] = useState([0, 0]);
@@ -151,10 +152,18 @@ function App() {
           style={{ marginLeft: `calc(${-index * 100}% + ${dragging ? dragX : 0}px)` }}
         >
           <div className="page-pane" ref={forecastRef} inert={index !== 0} aria-hidden={index !== 0}>
-            <SunsetPredictor />
+            <SunsetPredictor
+              onShareEvening={(draft) => {
+                setEveningDraft(draft);
+                goTo(1);
+              }}
+            />
           </div>
           <div className="page-pane" ref={socialRef} inert={index !== 1} aria-hidden={index !== 1}>
-            <Social />
+            <Social
+              eveningDraft={eveningDraft}
+              onEveningDraftUsed={() => setEveningDraft(null)}
+            />
           </div>
         </div>
       </div>

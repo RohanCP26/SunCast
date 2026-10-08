@@ -141,6 +141,7 @@
 .social-auth button[type='submit'],
 .share-btn,
 .friend-search button,
+.contacts-find,
 .friend-row button,
 .row-actions button,
 .edit-profile,
@@ -414,6 +415,29 @@
   font-size: 0.75rem;
 }
 
+.comment-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.comment-delete {
+  border: none;
+  background: none;
+  color: #9a3412;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.15rem 0;
+  min-height: 32px;
+  cursor: pointer;
+}
+
+.comment-delete:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .comment-form {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -540,6 +564,22 @@
   margin-bottom: 0.85rem;
 }
 
+.avatar-column {
+  display: grid;
+  justify-items: center;
+}
+
+.avatar-remove {
+  text-align: center;
+  font-size: 0.78rem;
+  min-height: 32px;
+  padding: 0.15rem 0.2rem;
+}
+
+.avatar-remove:disabled {
+  opacity: 0.55;
+}
+
 .avatar-wrap {
   position: relative;
   display: grid;
@@ -653,6 +693,14 @@
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.contacts-find {
+  width: 100%;
+}
+
+.contacts-find:disabled {
+  opacity: 0.7;
 }
 
 .friend-search {
@@ -816,4 +864,26 @@ button:disabled {
   .row-actions button {
     flex: 1;
   }
+}
+
+.report-box {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+.report-box select,
+.report-box input {
+  width: 100%;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+}
+
+.check-row input {
+  width: auto;
 }
